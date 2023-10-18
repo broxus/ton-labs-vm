@@ -23,17 +23,17 @@ use crate::{
             serialization::UnsignedIntegerBigEndianEncoding
         },
     },
-    types::{Exception, Status}
+    types::{ExceptionCode, Exception, Status}
 };
-use ed25519::signature::Verifier;
 use std::borrow::Cow;
-use ton_block::GlobalCapabilities;
-use ton_types::{BuilderData, error, GasConsumer, ExceptionCode, UInt256};
+use everscale_types::cell::CellBuilder;
+use everscale_types::models::GlobalCapability;
+use sha2::Digest;
 
-const PUBLIC_KEY_BITS:  usize = PUBLIC_KEY_BYTES * 8;
-const SIGNATURE_BITS:   usize = SIGNATURE_BYTES * 8;
-const PUBLIC_KEY_BYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
-const SIGNATURE_BYTES:  usize = ed25519_dalek::SIGNATURE_LENGTH;
+const PUBLIC_KEY_BYTES: usize = 32;
+const PUBLIC_KEY_BITS: usize = PUBLIC_KEY_BYTES * 8;
+const SIGNATURE_BYTES: usize = 64;
+const SIGNATURE_BITS: u16 = SIGNATURE_BYTES as u16 * 8;
 
 fn hash_to_uint(bits: impl AsRef<[u8]>) -> IntegerData {
     IntegerData::from_unsigned_bytes_be(bits)
@@ -44,7 +44,7 @@ fn hash_to_uint(bits: impl AsRef<[u8]>) -> IntegerData {
 pub(super) fn execute_hashcu(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("HASHCU"))?;
     fetch_stack(engine, 1)?;
-    let hash_int = hash_to_uint(engine.cmd.var(0).as_cell()?.repr_hash());
+    let hash_int = hash_to_uint(engine.cmd.var(0).as_cell()?.repr_hash().as_ref());
     engine.cc.stack.push(StackItem::integer(hash_int));
     Ok(())
 }
@@ -55,9 +55,10 @@ pub(super) fn execute_hashcu(engine: &mut Engine) -> Status {
 pub(super) fn execute_hashsu(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("HASHSU"))?;
     fetch_stack(engine, 1)?;
-    let builder = BuilderData::from_slice(engine.cmd.var(0).as_slice()?);
-    let cell = engine.finalize_cell(builder)?;
-    let hash_int = hash_to_uint(cell.repr_hash());
+    let mut builder = CellBuilder::new();
+    builder.store_slice(engine.cmd.var(0).as_slice()?.as_ref())?;
+    let cell = engine.gas_consumer.ctx(|c| builder.build_ext(c))?;
+    let hash_int = hash_to_uint(cell.repr_hash().as_ref());
     engine.cc.stack.push(StackItem::integer(hash_int));
     Ok(())
 }
@@ -69,10 +70,11 @@ pub(super) fn execute_hashsu(engine: &mut Engine) -> Status {
 pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("SHA256U"))?;
     fetch_stack(engine, 1)?;
-    let slice = engine.cmd.var(0).as_slice()?;
+    let slice = engine.cmd.var(0).as_slice()?.as_ref();
     if slice.remaining_bits() % 8 == 0 {
-        let hash = UInt256::calc_file_hash(&slice.get_bytestring(0));
-        let hash_int = hash_to_uint(hash);
+        let mut bytes = [0; 32];
+        let bytes = slice.get_raw(0, &mut bytes, slice.remaining_bits())?;
+        let hash_int = hash_to_uint(sha2::Sha256::digest(bytes));
         engine.cc.stack.push(StackItem::integer(hash_int));
         Ok(())
     } else {
@@ -81,21 +83,21 @@ pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
 }
 
 enum DataForSignature {
-    Hash(BuilderData),
+    Hash(CellBuilder),
     Slice(Vec<u8>)
 }
 
 impl AsRef<[u8]> for DataForSignature {
     fn as_ref(&self) -> &[u8] {
         match self {
-            DataForSignature::Hash(hash) => hash.data(),
+            DataForSignature::Hash(hash) => hash.raw_data(),
             DataForSignature::Slice(slice) => slice.as_slice()
         }
     }
 }
 
 fn preprocess_signed_data<'a>(engine: &Engine, data: &'a [u8]) -> Cow<'a, [u8]> {
-    if engine.check_capabilities(GlobalCapabilities::CapSignatureWithId as u64) {
+    if engine.has_capability(GlobalCapability::CapSignatureWithId) {
         let mut extended_data = Vec::with_capacity(4 + data.len());
         extended_data.extend_from_slice(&engine.signature_id().to_be_bytes());
         extended_data.extend_from_slice(data);
@@ -115,48 +117,35 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
     } else {
         engine.cmd.var(2).as_slice()?;
     }
-    if engine.cmd.var(1).as_slice()?.remaining_bits() < SIGNATURE_BITS {
+    if engine.cmd.var(1).as_slice()?.as_ref().remaining_bits() < SIGNATURE_BITS {
         return err!(ExceptionCode::CellUnderflow)
     }
     let data = if hash {
         DataForSignature::Hash(engine.cmd.var(2).as_integer()?
             .as_builder::<UnsignedIntegerBigEndianEncoding>(256)?)
     } else {
-        if engine.cmd.var(2).as_slice()?.remaining_bits() % 8 != 0 {
+        let var2 = engine.cmd.var(2).as_slice()?.as_ref();
+        if var2.remaining_bits() % 8 != 0 {
             return err!(ExceptionCode::CellUnderflow)
         }
-        DataForSignature::Slice(engine.cmd.var(2).as_slice()?.get_bytestring(0))
+        DataForSignature::Slice(Vec::from(var2.get_raw(0, &mut [0; 128], var2.remaining_bits())?))
     };
-    let pub_key = match ed25519_dalek::PublicKey::from_bytes(pub_key.data()) {
-        Ok(pub_key) => pub_key,
-        Err(err) => if engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+    let pub_key = {
+        let mut buffer = [0; PUBLIC_KEY_BYTES];
+        pub_key.as_data_slice().get_raw(0, &mut buffer, PUBLIC_KEY_BITS as u16)?;
+        match everscale_crypto::ed25519::PublicKey::from_bytes(buffer) {
+            Some(pub_key) => pub_key,
+            None if engine.has_capability(GlobalCapability::CapsTvmBugfixes2022) => {
                 engine.cc.stack.push(boolean!(false));
                 return Ok(())
-            } else {
-                return err!(ExceptionCode::FatalError, "cannot load public key {}", err)
-            }
-    };
-    let signature = engine.cmd.var(1).as_slice()?.get_bytestring(0);
-    let signature = match ed25519::signature::Signature::from_bytes(&signature[..SIGNATURE_BYTES]) {
-        Ok(signature) => signature,
-        Err(err) => {
-            #[allow(clippy::collapsible_else_if)]
-            if engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
-                engine.cc.stack.push(boolean!(false));
-                return Ok(())
-            } else {
-                if hash {
-                    engine.cc.stack.push(boolean!(false));
-                    return Ok(())
-                } else {
-                    return err!(ExceptionCode::FatalError, "cannot load signature {}", err)
-                }
-            }
+            },
+            None => return err!(ExceptionCode::FatalError, "cannot load public key")
         }
     };
+    let mut signature = [0; SIGNATURE_BYTES];
+    engine.cmd.var(1).as_slice()?.as_ref().get_raw(0, &mut signature, SIGNATURE_BITS)?;
     let data = preprocess_signed_data(engine, data.as_ref());
-    let result =
-        engine.modifiers.chksig_always_succeed || pub_key.verify(&data, &signature).is_ok();
+    let result = engine.modifiers.chksig_always_succeed || pub_key.verify(&*data, &signature);
     engine.cc.stack.push(boolean!(result));
     Ok(())
 }

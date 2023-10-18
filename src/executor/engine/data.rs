@@ -11,11 +11,13 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::LoadMode;
+
 use crate::{
-    executor::{engine::Engine, microcode::{VAR, CELL, SLICE, BUILDER, CONTINUATION}},
-    stack::{StackItem, continuation::ContinuationData}, types::Status
+    OwnedCellSlice,
+    executor::{engine::Engine, microcode::{BUILDER, CELL, CONTINUATION, SLICE, VAR}},
+    stack::{continuation::ContinuationData, StackItem}, types::Status
 };
-use ton_types::{fail, GasConsumer};
 
 // Utilities ******************************************************************
 
@@ -29,18 +31,25 @@ fn convert_any(engine: &mut Engine, x: u16, to: u16, from: u16) -> Status {
                 BUILDER => {
                     let var = engine.cmd.var_mut(storage_index!(x));
                     let builder = var.as_builder_mut()?;
-                    let cell = engine.finalize_cell(builder)?;
+                    let cell = engine.gas_consumer.ctx(|c| builder.build_ext(c))?;
                     match to {
-                        CONTINUATION => StackItem::continuation(ContinuationData::with_code(engine.load_cell(cell)?)),
+                        CONTINUATION => {
+                            let cell = engine.gas_consumer.ctx(|c| c.load_cell(cell, LoadMode::Full))?;
+                            StackItem::continuation(ContinuationData::with_code(OwnedCellSlice::new(cell)?))
+                        },
                         CELL => StackItem::Cell(cell),
-                        SLICE => StackItem::Slice(engine.load_cell(cell)?),
+                        SLICE => StackItem::Slice(OwnedCellSlice::new(
+                            engine.gas_consumer.ctx(|c| c.load_cell(cell, LoadMode::Full))?
+                        )?),
                         _ => fail!("can convert builder only to cell, to slice or to continuation")
                     }
                 }
                 CELL => {
                     let var = engine.cmd.var(storage_index!(x));
                     let cell = var.as_cell()?.clone();
-                    let slice = engine.load_cell(cell)?;
+                    let slice = OwnedCellSlice::new(
+                        engine.gas_consumer.ctx(|c| c.load_cell(cell, LoadMode::Full))?
+                    )?;
                     match to {
                         CONTINUATION => StackItem::continuation(ContinuationData::with_code(slice)),
                         SLICE => StackItem::Slice(slice),

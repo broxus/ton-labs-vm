@@ -11,9 +11,8 @@
 * limitations under the License.
 */
 
-use crate::{error::TvmError, types::Exception};
+use crate::{error::TvmError, types::{Exception, Result, ExceptionCode}};
 use std::cmp::{max, min};
-use ton_types::{error, Result, types::ExceptionCode};
 
 // Gas state
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,9 +169,10 @@ impl Gas {
     }
 
     /// Try to consume gas then raise exception out of gas if needed
-    pub fn try_use_gas(&mut self, gas: i64) -> Result<Option<i32>> {
+    pub fn try_use_gas(&mut self, gas: i64) -> Result<()> {
         self.gas_remaining -= gas;
-        self.check_gas_remaining()
+        self.check_gas_remaining()?;
+        Ok(())
     }
 
     /// Raise out of gas exception
@@ -184,32 +184,24 @@ impl Gas {
         }
     }
 
-    // *** Getters ***
-    pub const fn get_gas_price(&self) -> i64 {
-        self.gas_price
-    }
-
-    pub const fn get_gas_limit(&self) -> i64 {
+    pub const fn limit(&self) -> i64 {
         self.gas_limit
     }
-
-    pub const fn get_gas_limit_max(&self) -> i64 {
-        self.gas_limit_max
+    pub const fn credit(&self) -> i64 {
+        self.gas_credit
     }
-
-    pub const fn get_gas_remaining(&self) -> i64 {
+    pub const fn price(&self) -> i64 {
+        self.gas_price
+    }
+    pub const fn remaining(&self) -> i64 {
         self.gas_remaining
     }
 
-    pub const fn get_gas_credit(&self) -> i64 {
-        self.gas_credit
-    }
-
-    pub const fn get_gas_used_full(&self) -> i64 {
+    pub const fn used(&self) -> i64 {
         self.gas_base - self.gas_remaining
     }
 
-    pub const fn get_gas_used(&self) -> i64 {
+    pub const fn vm_total_used(&self) -> i64 {
         if self.gas_remaining > 0 {
             self.gas_base - self.gas_remaining
         } else {

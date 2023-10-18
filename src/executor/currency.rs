@@ -11,23 +11,24 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::CellBuilder;
+use everscale_types::models::GlobalCapability;
 use crate::{
     error::TvmError,
     executor::{engine::{Engine, storage::fetch_stack}, types::Instruction},
     stack::{StackItem, integer::IntegerData},
-    types::{Exception, Status}
+    types::{ExceptionCode, Exception, Status}
 };
-use ton_block::GlobalCapabilities;
-use ton_types::{BuilderData, error, IBitstring, types::ExceptionCode};
 
 // slice - uint slice'
 fn load_var(engine: &mut Engine, name: &'static str, max_bytes: u8, sign: bool) -> Status {
     engine.load_instruction(Instruction::new(name))?;
     fetch_stack(engine, 1)?;
     let mut slice = engine.cmd.var(0).as_slice()?.clone();
-    let len = 8 - (max_bytes - 1).leading_zeros() as usize;
-    let bytes = slice.get_next_int(len)? as usize;
-    let vec = slice.get_next_bytes(bytes)?;
+    let len = 8 - (max_bytes - 1).leading_zeros() as u8;
+    let bytes = slice.as_mut().load_small_uint(len as u16)?;
+    let mut vec = [0; 128];
+    let vec = slice.as_mut().load_raw(&mut vec, bytes as u16 * 8)?;
     let value = match sign {
         true => num::BigInt::from_signed_bytes_be(&vec),
         false => num::BigInt::from_bytes_be(num::bigint::Sign::Plus, &vec)
@@ -55,7 +56,7 @@ fn store_var(engine: &mut Engine, name: &'static str, max_bits: usize, sign: boo
     engine.load_instruction(Instruction::new(name))?;
     fetch_stack(engine, 2)?;
     let x = engine.cmd.var(0).as_integer()?;
-    if engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) && x.is_nan() {
+    if engine.has_capability(GlobalCapability::CapsTvmBugfixes2022) && x.is_nan() {
         return err!(ExceptionCode::IntegerOverflow);
     }
     let b = engine.cmd.var(1).as_builder()?;
@@ -69,23 +70,23 @@ fn store_var(engine: &mut Engine, name: &'static str, max_bits: usize, sign: boo
     if bits > max_bits {
         return err!(ExceptionCode::RangeCheckError, "{} has {} bits, but max is {}", x, bits, max_bits)
     }
-    let len = 16 - (max_bits as u16 / 8).leading_zeros();
+    let len = 16 - (max_bits as u16 / 8).leading_zeros() as u16;
     match max_bits {
         120 => debug_assert_eq!(len, 4),
         248 => debug_assert_eq!(len, 5),
         _ => debug_assert_eq!(len, 0)
     }
-    let mut x = BuilderData::new();
+    let mut x = CellBuilder::new();
     let bytes = if bits != 0 {
-        vec.len()
+        vec.len() as u16
     } else {
         0
     };
-    x.append_bits(bytes, len as usize)?;
-    x.append_raw(&vec, bytes * 8)?;
-    if b.can_append(&x) {
+    x.store_uint(bytes  as u64, len)?;
+    x.store_raw(&vec, bytes * 8)?;
+    if b.has_capacity(x.bit_len(), x.references().len() as u8) {
         let mut b = engine.cmd.var_mut(1).as_builder_mut()?;
-        b.append_builder(&x).expect("free space was checked before");
+        b.store_builder(&x).expect("free space was checked before");
         engine.cc.stack.push_builder(b);
         Ok(())
     } else {

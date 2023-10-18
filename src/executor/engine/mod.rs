@@ -16,6 +16,7 @@ pub(in crate::executor) mod data;
 mod handlers;
 #[macro_use]
 pub(in crate::executor) mod storage;
+mod gas_consumer;
 
 pub use self::core::*;
-
+pub use self::gas_consumer::*;

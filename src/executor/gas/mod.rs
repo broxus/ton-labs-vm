@@ -11,28 +11,29 @@
 * limitations under the License.
 */
 
+use everscale_types::models::GlobalCapability;
+
 use crate::{
     error::TvmError,
     executor::{engine::{Engine, storage::fetch_stack}, types::Instruction},
-    stack::{StackItem, integer::{IntegerData, conversion::FromInt, behavior::Quiet, math::Round}},
-    types::{Exception, Status}
+    stack::{integer::{behavior::Quiet, conversion::FromInt, IntegerData, math::Round}, StackItem},
+    types::{Result, ExceptionCode, Exception, Status}
 };
-use ton_block::GlobalCapabilities;
-use ton_types::{error, types::ExceptionCode, Result};
+use crate::executor::gas::gas_state::Gas;
 
 pub mod gas_state;
 
-fn gramtogas(engine: &Engine, nanograms: &IntegerData) -> Result<i64> {
-    let gas_price = IntegerData::from_i64(engine.get_gas().get_gas_price());
+fn gramtogas(gas: &Gas, nanograms: &IntegerData) -> Result<i64> {
+    let gas_price = IntegerData::from_i64(gas.price());
     let gas = nanograms.div::<Quiet>(&gas_price, Round::FloorToZero)?.0;
     let ret = gas.take_value_of(|x| i64::from_int(x).ok()).unwrap_or(i64::MAX);
     Ok(ret)
 }
-fn setgaslimit(engine: &mut Engine, gas_limit: i64) -> Status {
-    if gas_limit < engine.gas_used() {
+fn setgaslimit(gas: &mut Gas, gas_limit: i64) -> Status {
+    if gas_limit < gas.used() {
         return err!(ExceptionCode::OutOfGas);
     }
-    engine.new_gas_limit(gas_limit);
+    gas.new_gas_limit(gas_limit);
     Ok(())
 }
 
@@ -40,7 +41,7 @@ fn setgaslimit(engine: &mut Engine, gas_limit: i64) -> Status {
 // ACCEPT - F800
 pub fn execute_accept(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("ACCEPT"))?;
-    engine.new_gas_limit(i64::MAX);
+    engine.gas_consumer.gas_mut().new_gas_limit(i64::MAX);
     Ok(())
 }
 // Application-specific primitives - A.11; Gas-related primitives - A.11.2
@@ -50,7 +51,7 @@ pub fn execute_setgaslimit(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let gas_limit = engine.cmd.var(0).as_integer()?
         .take_value_of(|x| i64::from_int(x).ok())?;
-    setgaslimit(engine, gas_limit)
+    setgaslimit(&mut engine.gas_consumer.gas_mut(), gas_limit)
 }
 // Application-specific primitives - A.11; Gas-related primitives - A.11.2
 // BUYGAS - F802
@@ -58,8 +59,8 @@ pub fn execute_buygas(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("BUYGAS"))?;
     fetch_stack(engine, 1)?;
     let nanograms = engine.cmd.var(0).as_integer()?;
-    let gas_limit = gramtogas(engine, nanograms)?;
-    setgaslimit(engine, gas_limit)
+    let gas_limit = gramtogas(&mut engine.gas_consumer.gas(), nanograms)?;
+    setgaslimit(&mut engine.gas_consumer.gas_mut(), gas_limit)
 }
 // Application-specific primitives - A.11; Gas-related primitives - A.11.2
 // GRAMTOGAS - F804
@@ -71,7 +72,7 @@ pub fn execute_gramtogas(engine: &mut Engine) -> Status {
         0
     } else {
         let nanograms = nanograms_input.as_integer()?;
-        gramtogas(engine, nanograms)?
+        gramtogas(&mut engine.gas_consumer.gas(), nanograms)?
     };
     engine.cc.stack.push(int!(gas));
     Ok(())
@@ -82,7 +83,7 @@ pub fn execute_gastogram(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("GASTOGRAM"))?;
     fetch_stack(engine, 1)?;
     let gas = engine.cmd.var(0).as_integer()?;
-    let gas_price = engine.get_gas().get_gas_price();
+    let gas_price = engine.gas_consumer.gas().price();
     let nanogram_output = gas.mul::<Quiet>(&IntegerData::from_i64(gas_price))?;
     engine.cc.stack.push(StackItem::int(nanogram_output));
     Ok(())
@@ -97,8 +98,8 @@ pub fn execute_commit(engine: &mut Engine) -> Status {
 }
 
 pub fn execute_gas_remaining(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapsTvmBugfixes2022)?;
+    engine.check_capability(GlobalCapability::CapsTvmBugfixes2022)?;
     engine.load_instruction(Instruction::new("GASREMAINING"))?;
-    engine.cc.stack.push(StackItem::int(engine.gas_remaining()));
+    engine.cc.stack.push(StackItem::int(engine.gas().remaining()));
     Ok(())
 }

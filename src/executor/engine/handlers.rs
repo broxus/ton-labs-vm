@@ -22,10 +22,9 @@ use crate::{
         types::{InstructionOptions, Instruction}
     },
     stack::integer::behavior::{Signaling, Quiet},
-    types::{Exception, Status}
+    types::{Result, ExceptionCode, Exception, Status}
 };
 use std::{fmt, ops::Range};
-use ton_types::{error, Result, types::ExceptionCode};
 
 // ( - )
 fn execute_nop(engine: &mut Engine) -> Status {
@@ -763,10 +762,10 @@ impl Handlers {
                 .set(0x6D, execute_dictsetgetoptref)
                 .set(0x6E, execute_dictisetgetoptref)
                 .set(0x6F, execute_dictusetgetoptref)
-                .set(0x70, execute_pfxdictset)
-                .set(0x71, execute_pfxdictreplace)
-                .set(0x72, execute_pfxdictadd)
-                .set(0x73, execute_pfxdictdel)
+                // .set(0x70, execute_pfxdictset)
+                // .set(0x71, execute_pfxdictreplace)
+                // .set(0x72, execute_pfxdictadd)
+                // .set(0x73, execute_pfxdictdel)
                 .set(0x74, execute_dictgetnext)
                 .set(0x75, execute_dictgetnexteq)
                 .set(0x76, execute_dictgetprev)
@@ -808,18 +807,18 @@ impl Handlers {
                 .set(0xA2, execute_dictigetexec)
                 .set(0xA3, execute_dictugetexec)
                 .set_range(0xA4..0xA8, execute_dictpushconst)
-                .set(0xA8, execute_pfxdictgetq)
-                .set(0xA9, execute_pfxdictget)
-                .set(0xAA, execute_pfxdictgetjmp)
-                .set(0xAB, execute_pfxdictgetexec)
-                .set_range(0xAC..0xAF, execute_pfxdictswitch)
-                .set(0xAF, execute_pfxdictswitch)
-                .set(0xB1, execute_subdictget)
-                .set(0xB2, execute_subdictiget)
-                .set(0xB3, execute_subdictuget)
-                .set(0xB5, execute_subdictrpget)
-                .set(0xB6, execute_subdictirpget)
-                .set(0xB7, execute_subdicturpget)
+                // .set(0xA8, execute_pfxdictgetq)
+                // .set(0xA9, execute_pfxdictget)
+                // .set(0xAA, execute_pfxdictgetjmp)
+                // .set(0xAB, execute_pfxdictgetexec)
+                // .set_range(0xAC..0xAF, execute_pfxdictswitch)
+                // .set(0xAF, execute_pfxdictswitch)
+                // .set(0xB1, execute_subdictget)
+                // .set(0xB2, execute_subdictiget)
+                // .set(0xB3, execute_subdictuget)
+                // .set(0xB5, execute_subdictrpget)
+                // .set(0xB6, execute_subdictirpget)
+                // .set(0xB7, execute_subdicturpget)
                 .set(0xBC, execute_dictigetjmpz)
                 .set(0xBD, execute_dictugetjmpz)
                 .set(0xBE, execute_dictigetexecz)
@@ -884,7 +883,7 @@ impl Handlers {
             .set(0x44, execute_find_by_init_code_hash)
             .set(0x45, execute_find_by_code_hash)
             .set(0x46, execute_find_by_data_hash)
-            .set(0x50, execute_try_elect)
+            // .set(0x50, execute_try_elect)
         )
     }
     /// Dumping functions

@@ -11,8 +11,8 @@
 * limitations under the License.
 */
 
-use crate::stack::BuilderData;
-use ton_types::Result;
+use everscale_types::cell::CellBuilder;
+use crate::types::Result;
 
 pub trait Deserializer<T> {
     /// Tries to deserialize a value from a bitstring
@@ -21,5 +21,5 @@ pub trait Deserializer<T> {
 }
 
 pub trait Serializer<T> {
-    fn try_serialize(&self, value: &T) -> Result<BuilderData>;
+    fn try_serialize(&self, value: &T, builder: &mut CellBuilder) -> Result<()>;
 }

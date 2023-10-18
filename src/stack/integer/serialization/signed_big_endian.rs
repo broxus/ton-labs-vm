@@ -23,12 +23,11 @@ use crate::{
         },
         serialization::{Deserializer, Serializer},
     },
-    types::Exception,
+    types::{Exception, ExceptionCode, Result}
 };
 use num::bigint::ToBigInt;
 use num_traits::Signed;
-use smallvec::SmallVec;
-use ton_types::{error, BuilderData, ExceptionCode, Result};
+use everscale_types::cell::CellBuilder;
 
 pub struct SignedIntegerBigEndianEncoding {
     length_in_bits: usize
@@ -41,7 +40,7 @@ impl Encoding for SignedIntegerBigEndianEncoding {
 }
 
 impl Serializer<IntegerData> for SignedIntegerBigEndianEncoding {
-    fn try_serialize(&self, value: &IntegerData) -> Result<BuilderData> {
+    fn try_serialize(&self, value: &IntegerData, builder: &mut CellBuilder) -> Result<()> {
         if !value.fits_in(self.length_in_bits)? {
             // Spec. 3.2.7
             // * If the integer x to be serialized is not in the range
@@ -61,7 +60,8 @@ impl Serializer<IntegerData> for SignedIntegerBigEndianEncoding {
         let mut buffer = value.to_signed_bytes_be();
         buffer = extend_buffer_be(buffer, self.length_in_bits, value.is_negative());
 
-        BuilderData::with_raw(SmallVec::from_vec(buffer), self.length_in_bits)
+        builder.store_raw(buffer.as_slice(), self.length_in_bits as u16)?;
+        Ok(())
     }
 }
 

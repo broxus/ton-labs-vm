@@ -1,25 +1,23 @@
 [package]
 edition = "2021"
 name = "ton_vm"
-version = "1.8.29"
+version = "2.0.0"
 
 [dependencies]
-ton_types = { git = "https://github.com/broxus/ton-labs-types.git" }
-ton_block = { git = "https://github.com/broxus/ton-labs-block.git" }
-
-# External
+ahash = "0.8.3"
 anyhow = "1"
-ed25519 = "1.2"
-ed25519-dalek = { git = "https://github.com/broxus/ed25519-dalek.git" }
 hex = "0.4"
 lazy_static = "1.4"
 log = "0.4.8"
 num = "0.4"
+num-derive = "0.3"
 num-traits = "0.2"
 rand = "0.8"
 sha2 = "0.9"
 thiserror = "1.0.26"
-smallvec = { version = "1.6.1", features = ["const_generics", "union", "write"] }
+
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"] }
+everscale-crypto = "0.2"
 
 [features]
 fift_check = []

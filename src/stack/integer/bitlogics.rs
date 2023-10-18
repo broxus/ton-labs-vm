@@ -15,7 +15,7 @@ use crate::stack::integer::{
     IntegerData, behavior::OperationBehavior,
     utils::{binary_op, construct_single_nan, process_single_result, unary_op}
 };
-use ton_types::Result;
+use crate::types::Result;
 
 impl IntegerData {
     pub fn and<T>(&self, other: &IntegerData) -> Result<IntegerData>

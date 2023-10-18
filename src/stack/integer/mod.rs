@@ -13,19 +13,20 @@
 */
 
 use crate::{
+    OwnedCellSlice,
     error::TvmError,
     stack::integer::{
         behavior::{OperationBehavior, Quiet, Signaling},
         serialization::Encoding,
     },
-    types::{ResultOpt, Exception},
+    types::{ExceptionCode, Result, ResultOpt, Exception},
 };
-use ton_types::{error, BuilderData, ExceptionCode, Result, SliceData};
 
 use core::mem;
 use num_traits::{One, Signed, Zero};
 use std::cmp;
 use std::cmp::Ordering;
+use everscale_types::cell::{CellBuilder};
 
 #[macro_use]
 pub mod behavior;
@@ -211,15 +212,24 @@ impl IntegerData {
         })
     }
 
-    pub fn as_slice<T: Encoding>(&self, bits: usize) -> Result<SliceData> {
-        SliceData::load_builder(self.as_builder::<T>(bits)?)
+    pub fn as_slice<T: Encoding>(&self, bits: usize) -> Result<OwnedCellSlice> {
+        let builder = self.as_builder::<T>(bits)?;
+        Ok(OwnedCellSlice::new(builder.build()?)?)
     }
 
-    pub fn as_builder<T: Encoding>(&self, bits: usize) -> Result<BuilderData> {
+    pub fn as_builder<T: Encoding>(&self, bits: usize) -> Result<CellBuilder> {
         if self.is_nan() {
             Signaling::on_nan_parameter(file!(), line!())?;
         }
-        T::new(bits).try_serialize(self)
+        let mut builder = CellBuilder::new();
+        T::new(bits).try_serialize(self, &mut builder)?;
+        Ok(builder)
+    }
+    pub fn store_into_builder<T: Encoding>(&self, bits: usize, builder: &mut CellBuilder) -> Result<()> {
+        if self.is_nan() {
+            Signaling::on_nan_parameter(file!(), line!())?;
+        }
+        T::new(bits).try_serialize(self, builder)
     }
     pub fn as_unsigned_bytes_be(&self) -> Result<Vec<u8>> {
         unimplemented!()

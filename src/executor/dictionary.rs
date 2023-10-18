@@ -11,33 +11,74 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::{CellBuilder, CellSlice, Store};
+use everscale_types::dict::{dict_find_bound_owned, dict_find_owned, dict_get_owned, dict_insert_owned, dict_remove_owned, DictBound, SetMode};
+use everscale_types::prelude::Cell;
+
+use crate::{OwnedCellSlice, types::{ExceptionCode, Result}, utils::get_dictionary_opt};
+
 use crate::{
     error::TvmError,
     executor::{
-        Mask, continuation::{callx, switch}, engine::{Engine, storage::{fetch_stack}},
+        continuation::{callx, switch}, engine::{Engine, storage::fetch_stack}, GasConsumer, Mask,
         microcode::VAR, types::{Instruction, InstructionOptions}
     },
     stack::{
-        StackItem, continuation::ContinuationData,
-        integer::{
+        continuation::ContinuationData, integer::{
             IntegerData,
             serialization::{
                 Encoding, SignedIntegerBigEndianEncoding,
                 UnsignedIntegerBigEndianEncoding
             }
         },
-        serialization::Deserializer
+        serialization::Deserializer,
+        StackItem
     },
     types::{Exception, Status}
 };
-use ton_types::{
-    BuilderData, error, fail, GasConsumer, HashmapE, HashmapSubtree, PfxHashmapE, Result, SliceData,
-    types::ExceptionCode
-};
+use crate::executor::types::InstructionExt;
 
-fn try_unref_leaf(slice: SliceData) -> Result<StackItem> {
-    match slice.remaining_bits() == 0 && slice.remaining_references() != 0 {
-        true => Ok(StackItem::Cell(slice.reference(0)?)),
+fn dict_get_wrap(
+    gas_consumer: &mut GasConsumer,
+    dict: &mut Option<Cell>,
+    key: CellSlice
+) -> Result<Option<OwnedCellSlice>> {
+    let result = gas_consumer
+        .ctx(|c| dict_get_owned(dict.as_ref(), key.remaining_bits(), key, c))?
+        .map(OwnedCellSlice::try_from).transpose()?;
+    Ok(result)
+}
+
+fn dict_insert_wrap(
+    gas_consumer: &mut GasConsumer,
+    dict: &mut Option<Cell>,
+    mut key: CellSlice,
+    new_val: &dyn Store,
+    mode: SetMode
+) -> Result<Option<OwnedCellSlice>> {
+    let key_len = key.remaining_bits();
+    let (_, prev) = gas_consumer
+        .ctx(|c| dict_insert_owned(dict, key.as_mut(), key_len, new_val, mode, c))?;
+    Ok(prev.map(OwnedCellSlice::try_from).transpose()?)
+}
+
+fn dict_remove_wrap(
+    gas_consumer: &mut GasConsumer,
+    dict: &mut Option<Cell>,
+    mut key: CellSlice
+) -> Result<Option<OwnedCellSlice>> {
+    let key_len = key.remaining_bits();
+    let prev = gas_consumer
+        .ctx(|c| dict_remove_owned(dict, key.as_mut(), key_len, false, c))?;
+    Ok(prev.map(OwnedCellSlice::try_from).transpose()?)
+}
+
+
+fn try_unref_leaf(slice: OwnedCellSlice) -> Result<StackItem> {
+    match slice.as_ref().remaining_bits() == 0 && slice.as_ref().remaining_refs() != 0 {
+        true => {
+            Ok(StackItem::Cell(slice.as_ref().get_reference_cloned(0)?))
+        },
         false => err!(ExceptionCode::DictionaryError)
     }
 }
@@ -57,10 +98,15 @@ const STAY: u8 = 0x20;  // STAY argument on stack in failure case
 const CALLX: u8 = 0x40;   // CALLX to found value
 const SWITCH: u8 = 0x80;  // SWITCH to found value
 
-const CMD: u8 = 0x01;     // Get key from CMD
+// const CMD: u8 = 0x01;     // Get key from CMD
 
-type KeyReader = fn(&StackItem, usize) -> Result<SliceData>;
-type ValAccessor = fn(&mut Engine, &mut HashmapE, SliceData) -> Result<Option<StackItem>>;
+type KeyReader = for<'a> fn(&'a StackItem, usize, &'a mut CellBuilder) -> Status;
+type ValAccessor = fn(
+    &mut GasConsumer,
+    &mut InstructionExt,
+    &mut Option<Cell>,
+    CellSlice
+) -> Result<Option<StackItem>>;
 
 // Legend: ret = 0 if INV or -1
 // ((value if SET) key slice nbits -
@@ -85,9 +131,10 @@ fn dict(
     )?;
     fetch_stack(engine, params)?;
     let nbits = engine.cmd.var(0).as_integer()?.into(0..=1023)?;
-    let mut dict = HashmapE::with_hashmap(nbits, engine.cmd.var(1).as_dict()?.cloned());
-    let key = keyreader(engine.cmd.var(2), nbits)?;
-    if key.is_empty() {
+    let mut dict_cell = engine.cmd.var(1).as_dict()?.cloned();
+    let mut key = CellBuilder::new();
+    keyreader(engine.cmd.var(2), nbits, &mut key)?; // TODO: somehow reuse `cmd` ref in handler
+    if key.bit_len() == 0 {
         if how.any(SET | DEL) {
             err!(ExceptionCode::RangeCheckError, "key cannot be empty for set or delete")
         } else {
@@ -97,9 +144,9 @@ fn dict(
             Ok(())
         }
     } else {
-        let val = handler(engine, &mut dict, key)?;
+        let val = handler(&mut engine.gas_consumer, &mut engine.cmd, &mut dict_cell, key.as_data_slice())?;
         if how.any(SET | DEL) {
-            engine.cc.stack.push(StackItem::dict(&dict));
+            engine.cc.stack.push(StackItem::dict(dict_cell));
         }
         match val {
             None => if how.bit(RET) {
@@ -129,12 +176,14 @@ fn dictcont(
         Instruction::new(name)
     )?;
     fetch_stack(engine, 3)?;
-    let nbits = engine.cmd.var(0).as_integer()?.into(0..=1023)?;
-    let dict = HashmapE::with_hashmap(nbits, engine.cmd.var(1).as_dict()?.cloned());
-    let key = keyreader(engine.cmd.var(2), nbits)?;
-    if let Some(data) = dict.get_with_gas(key, engine)? {
+    let nbits = engine.cmd.var(0).as_integer()?.into(0..=1023)? as u16;
+    let dict_cell = engine.cmd.var(1).as_dict()?;
+    let mut key = CellBuilder::new();
+    keyreader(engine.cmd.var(2), nbits as usize, &mut key)?;
+    if let Some(cell_slice_parts) = engine.gas_consumer
+        .ctx(|c| dict_get_owned(dict_cell, nbits, key.as_data_slice(), c))? {
         engine.cmd.vars.push(StackItem::continuation(
-            ContinuationData::with_code(data)
+            ContinuationData::with_code(cell_slice_parts.try_into()?)
         ));
         let n = engine.cmd.var_count() - 1;
         if how.bit(SWITCH) {
@@ -160,15 +209,20 @@ fn dictiter(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     )?;
     fetch_stack(engine, 3)?;
     let nbits = engine.cmd.var(0).as_integer()?.into(0..=1023)?;
-    let dict = HashmapE::with_hashmap(nbits, engine.cmd.var(1).as_dict()?.cloned());
-    let result = match read_key(engine.cmd.var(2), nbits, how)? {
-        (Some(key), _) => iter_reader(engine, &dict, key, how)?,
-        (None, neg) if !neg ^ how.bit(MIN) => finder(engine, &dict, how)?,
+    let dict = engine.cmd.var(1).as_dict()?;
+    let mut key = CellBuilder::new();
+    let result = match read_key(engine.cmd.var(2), nbits, how, &mut key)? {
+        None => {
+            iter_reader(&mut engine.gas_consumer, dict, key.as_data_slice(), how)?
+        },
+        Some(neg) if !neg ^ how.bit(MIN) => {
+            finder(&mut engine.gas_consumer, dict, nbits, how)?
+        },
         _ => None
     };
     if let Some((key, value)) = result {
         engine.cc.stack.push(value);
-        let key = write_key(engine, key, how)?;
+        let key = write_key(&mut engine.gas_consumer, key, how)?;
         engine.cc.stack.push(key);
         engine.cc.stack.push(boolean!(true));
     } else {
@@ -188,25 +242,26 @@ fn find(
     )?;
     fetch_stack(engine, 2)?;
     let nbits = engine.cmd.var(0).as_integer()?.into(0..=1023)?;
-    let mut dict = HashmapE::with_hashmap(nbits, engine.cmd.var(1).as_dict()?.cloned());
-    if let Some((key, value)) = finder(engine, &dict, how)? {
+    let mut dict = engine.cmd.var(1).as_dict()?.cloned();
+    if let Some((key, value)) = finder(&mut engine.gas_consumer, dict.as_ref(), nbits, how)? {
         if how.bit(DEL) {
-            dict.remove_with_gas(SliceData::load_builder(key.clone())?, engine)?;
-            engine.cc.stack.push(StackItem::dict(&dict));
+            let _ = engine.gas_consumer
+                .ctx(|c| dict_remove_owned(&mut dict, &mut key.as_data_slice(), nbits as u16, false, c))?;
+            engine.cc.stack.push(StackItem::dict(dict));
         }
         engine.cc.stack.push(value);
-        let key = write_key(engine, key, how)?;
+        let key = write_key(&mut engine.gas_consumer, key, how)?;
         engine.cc.stack.push(key);
         engine.cc.stack.push(boolean!(true));
     } else {
         if how.bit(DEL) {
-            engine.cc.stack.push(StackItem::dict(&dict));
+            engine.cc.stack.push(StackItem::dict(dict));
         }
         engine.cc.stack.push(boolean!(false));
     }
     Ok(())
 }
-
+/* FIXME support prefix dict
 // (value key slice nbits - slice -1|0)
 fn pfxdictset(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     engine.load_instruction(
@@ -304,183 +359,149 @@ fn pfxdictget(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         err!(ExceptionCode::CellUnderflow)
     }
 }
-
-fn keyreader_from_slice(key: &StackItem, nbits: usize) -> Result<SliceData> {
-    let mut key = key.as_slice()?.clone();
-    if key.remaining_bits() < nbits {
+*/
+fn keyreader_from_slice<'a>(key: &'a StackItem, nbits: usize, builder: &'a mut CellBuilder) -> Status {
+    let key = key.as_slice()?.as_ref();
+    if (key.remaining_bits() as usize) < nbits {
         err!(ExceptionCode::CellUnderflow)
     } else {
-        key.shrink_data(..nbits);
-        key.shrink_references(..0);
-        Ok(key)
+        builder.store_slice_data(key.get_prefix(nbits as _, 0))?;
+        Ok(())
     }
 }
 
-fn keyreader_from_int(key: &StackItem, nbits: usize) -> Result<SliceData> {
+fn keyreader_from_int<'a>(key: &'a StackItem, nbits: usize, builder: &'a mut CellBuilder) -> Status {
     let key = key.as_integer()?;
     if key.is_nan() {
         return err!(ExceptionCode::IntegerOverflow);
     }
-    key.as_slice::<SignedIntegerBigEndianEncoding>(nbits)
+    key.store_into_builder::<SignedIntegerBigEndianEncoding>(nbits, builder)?;
+    Ok(())
 }
 
-fn keyreader_from_uint(key: &StackItem, nbits: usize) -> Result<SliceData> {
+fn keyreader_from_uint<'a>(key: &'a StackItem, nbits: usize, builder: &'a mut CellBuilder) -> Status {
     let key = key.as_integer()?;
     if key.is_nan() || key.is_neg() {
         return err!(ExceptionCode::IntegerOverflow);
     }
-    key.as_slice::<UnsignedIntegerBigEndianEncoding>(nbits)
+    key.store_into_builder::<UnsignedIntegerBigEndianEncoding>(nbits, builder)?;
+    Ok(())
 }
 
-fn read_key(key: &StackItem, nbits: usize, how: u8) -> Result<(Option<SliceData>, bool)> {
+fn read_key<'a>(key: &'a StackItem, nbits: usize, how: u8, builder: &'a mut CellBuilder) -> Result<Option<bool>> {
     if how.bit(SLC) {
-        return Ok((Some(keyreader_from_slice(key, nbits)?), false))
+        keyreader_from_slice(key, nbits, builder)?;
+        return Ok(None)
     } else {
         let key = key.as_integer()?;
         if how.bit(SIGN) {
             if !key.is_nan() {
-                if let Ok(slice) = key.as_slice::<SignedIntegerBigEndianEncoding>(nbits) {
-                    return Ok((Some(slice), key.is_neg()))
+                if key.store_into_builder::<SignedIntegerBigEndianEncoding>(nbits, builder).is_ok() {
+                    return Ok(None)
                 }
             }
         } else if !key.is_nan() && !key.is_neg() {
-            if let Ok(slice) = key.as_slice::<UnsignedIntegerBigEndianEncoding>(nbits) {
-                return Ok((Some(slice), false))
+            if key.store_into_builder::<UnsignedIntegerBigEndianEncoding>(nbits, builder).is_ok() {
+                return Ok(None)
             }
         }
     }
 
-    Ok((None, key.as_integer()?.is_neg()))
+    Ok(Some(key.as_integer()?.is_neg()))
 }
 
-fn valreader_from_slice(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    Ok(dict.get_with_gas(key, engine)?.map(StackItem::Slice))
+fn valreader_from_slice(gas_consumer: &mut GasConsumer, _cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    Ok(dict_get_wrap(gas_consumer, dict, key)?.map(StackItem::Slice))
 }
 
-fn valreader_from_ref(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    dict.get_with_gas(key, engine)?.map(try_unref_leaf).transpose()
+fn valreader_from_ref(gas_consumer: &mut GasConsumer, _cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    Ok(dict_get_wrap(gas_consumer, dict, key)?.map(try_unref_leaf).transpose()?)
 }
 
-fn valreader_from_refopt(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    dict.get_with_gas(key, engine)?.map(try_unref_leaf).or(Some(Ok(StackItem::None))).transpose()
+fn valreader_from_refopt(gas_consumer: &mut GasConsumer, _cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    Ok(dict_get_wrap(gas_consumer, dict, key)?.map(try_unref_leaf).transpose()?.or(Some(StackItem::None)))
 }
 
-fn valwriter_add_slice(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    let new_val = engine.cmd.var_mut(3).withdraw();
-    match dict.add_with_gas(key, new_val.as_slice()?, engine)? {
-        Some(val) => Ok(Some(StackItem::Slice(val))),
-        None => Ok(None),
-    }
+fn valwriter_add_slice(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, new_val.as_slice()?.as_ref(), SetMode::Add)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_add_builder(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    let new_val = engine.cmd.var_mut(3).withdraw();
-    match dict.add_builder_with_gas(key, new_val.as_builder()?, engine)? {
-        Some(val) => Ok(Some(StackItem::Slice(val))),
-        None => Ok(None),
-    }
+fn valwriter_add_builder(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let new_val = new_val.as_builder()?;
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val.as_full_slice(), SetMode::Add)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_add_ref(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    let new_val = engine.cmd.var(3).as_cell()?.clone();
-    match dict.addref_with_gas(key, &new_val, engine)? {
-        Some(val) => Ok(Some(try_unref_leaf(val)?)),
-        None => Ok(None),
-    }
+fn valwriter_add_ref(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var(3).as_cell()?.clone();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val, SetMode::Add)?;
+    Ok(prev.map(try_unref_leaf).transpose()?)
 }
 
-fn valwriter_add_ref_without_unref(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    let new_val = engine.cmd.var(3).as_cell()?.clone();
-    match dict.get_with_gas(key.clone(), engine)? {
-        Some(val) => Ok(Some(StackItem::Slice(val))),
-        None => {
-            dict.setref_with_gas(key, &new_val, engine)?;
-            Ok(None)
-        }
-    }
+fn valwriter_add_ref_without_unref(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var(3).as_cell()?.clone();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val, SetMode::Add)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_add_or_remove_refopt(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    let old_value = match engine.cmd.var(3).as_dict()? {
-        Some(new_val) => dict.setref_with_gas(key, &new_val.clone(), engine)?,
-        None => dict.remove_with_gas(key, engine)?
+fn valwriter_add_or_remove_refopt(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let prev = match cmd.var(3).as_dict()?.cloned() {
+        Some(new_val) => dict_insert_wrap(gas_consumer, dict, key, &new_val, SetMode::Set)?,
+        None => dict_remove_wrap(gas_consumer, dict, key)?
     };
-    old_value.map(try_unref_leaf).or(Some(Ok(StackItem::None))).transpose()
+    Ok(prev.map(try_unref_leaf).transpose()?.or(Some(StackItem::None)))
 }
 
-fn valwriter_remove_slice(engine: &mut Engine, dict: &mut HashmapE, key: SliceData) -> Result<Option<StackItem>> {
-    Ok(dict.remove_with_gas(key, engine)?.map(StackItem::Slice))
+fn valwriter_remove_slice(gas_consumer: &mut GasConsumer, _cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let prev = dict_remove_wrap(gas_consumer, dict, key)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_remove_ref(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    dict.remove_with_gas(key, engine)?.map(try_unref_leaf).transpose()
+fn valwriter_remove_ref(gas_consumer: &mut GasConsumer, _cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let prev = dict_remove_wrap(gas_consumer, dict, key)?;
+    Ok(prev.map(try_unref_leaf).transpose()?)
 }
 
-fn valwriter_replace_slice(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var_mut(3).withdraw();
-    match dict.replace_with_gas(key, val.as_slice()?, engine)? {
-        Some(val) => Ok(Some(StackItem::Slice(val))),
-        None => Ok(None)
-    }
+fn valwriter_replace_slice(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, new_val.as_slice()?.as_ref(), SetMode::Replace)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_replace_builder(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var_mut(3).withdraw();
-    match dict.replace_builder_with_gas(key, val.as_builder()?, engine)? {
-        Some(val) => Ok(Some(StackItem::Slice(val))),
-        None => Ok(None)
-    }
+fn valwriter_replace_builder(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let new_val = new_val.as_builder()?;
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val.as_full_slice(), SetMode::Replace)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_replace_ref(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var(3).as_cell()?.clone();
-    match dict.replaceref_with_gas(key, &val, engine)? {
-        Some(val) => Some(try_unref_leaf(val)).transpose(),
-        None => Ok(None)
-    }
+fn valwriter_replace_ref(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let new_val = new_val.as_cell()?;
+    let prev = dict_insert_wrap(gas_consumer, dict, key, new_val, SetMode::Replace)?;
+    Ok(prev.map(try_unref_leaf).transpose()?)
 }
 
-fn valwriter_to_slice(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var_mut(3).withdraw();
-    Ok(dict.set_with_gas(key, val.as_slice()?, engine)?.map(StackItem::Slice))
+fn valwriter_to_slice(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, new_val.as_slice()?.as_ref(), SetMode::Set)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_to_builder(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var_mut(3).withdraw();
-    Ok(dict.set_builder_with_gas(key, val.as_builder()?, engine)?.map(StackItem::Slice))
+fn valwriter_to_builder(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var_mut(3).withdraw();
+    let new_val = new_val.as_builder()?;
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val.as_full_slice(), SetMode::Set)?;
+    Ok(prev.map(StackItem::Slice))
 }
 
-fn valwriter_to_ref(
-    engine: &mut Engine,
-    dict: &mut HashmapE,
-    key: SliceData
-) -> Result<Option<StackItem>> {
-    let val = engine.cmd.var(3).as_cell()?.clone();
-    dict.setref_with_gas(key, &val, engine)?.map(try_unref_leaf).transpose()
+fn valwriter_to_ref(gas_consumer: &mut GasConsumer, cmd: &mut InstructionExt, dict: &mut Option<Cell>, key: CellSlice) -> Result<Option<StackItem>> {
+    let new_val = cmd.var(3).as_cell()?.clone();
+    let prev = dict_insert_wrap(gas_consumer, dict, key, &new_val, SetMode::Set)?;
+    Ok(prev.map(try_unref_leaf).transpose()?)
 }
 
 const PREV: u8 = 0x00;
@@ -494,44 +515,43 @@ const MAX:  u8 = 0x00; // same as PREV
 const MIN:  u8 = 0x01; // same as NEXT
 
 fn iter_reader(
-    engine: &mut Engine,
-    dict: &HashmapE,
-    key: SliceData,
+    gas_consumer: &mut GasConsumer,
+    dict: Option<&Cell>,
+    key: CellSlice<'_>,
     how: u8,
-) -> Result<Option<(BuilderData, StackItem)>> {
-    match dict.find_leaf(key, how.bit(NEXT), how.bit(SAME), how.bit(SIGN), engine)? {
-        Some((key, val)) => Ok(Some((key, StackItem::Slice(val)))),
+) -> Result<Option<(CellBuilder, StackItem)>> {
+    let towards = if how.bit(NEXT) { DictBound::Max } else { DictBound::Min };
+    match gas_consumer.ctx(|c| dict_find_owned(dict, key.as_ref().remaining_bits(), key, towards, how.bit(SAME), how.bit(SIGN), c))? {
+        Some((key, val)) => {
+            Ok(Some((key, StackItem::Slice(val.try_into()?))))
+        },
         None => Ok(None)
     }
 }
 
-fn finder(engine: &mut Engine, dict: &HashmapE, how: u8) -> Result<Option<(BuilderData, StackItem)>> {
-    let key_val = if how.bit(MIN) {
-        dict.get_min(how.bit(SIGN), engine)?
-    } else {
-        dict.get_max(how.bit(SIGN), engine)?
-    };
-    match key_val {
+fn finder(gas_consumer: &mut GasConsumer, dict: Option<&Cell>, nbits: usize, how: u8) -> Result<Option<(CellBuilder, StackItem)>> {
+    let bound = if how.bit(MIN) { DictBound::Min } else { DictBound::Max };
+    match gas_consumer.ctx(|c| dict_find_bound_owned(dict, nbits as u16, bound, how.bit(SIGN), c))? {
         Some((key, val)) => if how.bit(REF) {
-            Ok(Some((key, try_unref_leaf(val)?)))
+            Ok(Some((key, try_unref_leaf(val.try_into()?)?)))
         } else {
-            Ok(Some((key, StackItem::Slice(val))))
+            Ok(Some((key, StackItem::Slice(val.try_into()?))))
         }
         None => Ok(None)
     }
 }
 
-fn write_key(engine: &mut Engine, key: BuilderData, how: u8) -> Result<StackItem> {
+fn write_key(gas_consumer: &mut GasConsumer, key: CellBuilder, how: u8) -> Result<StackItem> {
     if how.bit(SLC) {
-        let cell = engine.finalize_cell(key)?;
-        Ok(StackItem::Slice(SliceData::load_cell(cell)?))
+        let cell = gas_consumer.ctx(|c| key.build_ext(c))?;
+        Ok(StackItem::Slice(OwnedCellSlice::try_from(cell)?))
     } else if how.bit(SIGN) {
-        let encoding = SignedIntegerBigEndianEncoding::new(key.length_in_bits());
-        let ret = encoding.deserialize(key.data());
+        let encoding = SignedIntegerBigEndianEncoding::new(key.bit_len() as usize);
+        let ret = encoding.deserialize(&key.raw_data()[..((key.bit_len() as usize + 7) / 8)]);
         Ok(StackItem::integer(ret))
     } else {
-        let encoding = UnsignedIntegerBigEndianEncoding::new(key.length_in_bits());
-        let ret = encoding.deserialize(key.data());
+        let encoding = UnsignedIntegerBigEndianEncoding::new(key.bit_len() as usize);
+        let ret = encoding.deserialize(&key.raw_data()[..((key.bit_len() as usize + 7) / 8)]);
         Ok(StackItem::integer(ret))
     }
 }
@@ -1068,10 +1088,10 @@ pub(super) fn execute_dictpushconst(engine: &mut Engine) -> Status {
         Instruction::new("DICTPUSHCONST").set_opts(InstructionOptions::Dictionary(13, 10))
     )?;
     let slice = engine.cmd.slice();
-    if slice.remaining_references() == 0 {
+    if slice.as_ref().remaining_refs() == 0 {
         return err!(ExceptionCode::InvalidOpcode);
     } else {
-        engine.cc.stack.push(StackItem::Cell(slice.reference(0)?));
+        engine.cc.stack.push(StackItem::Cell(slice.as_ref().get_reference_cloned(0)?));
     }
     let key = engine.cmd.length();
     engine.cc.stack.push(int!(key));
@@ -1117,7 +1137,7 @@ pub(super) fn execute_dictugetexec(engine: &mut Engine) -> Status {
 pub(super) fn execute_dictugetexecz(engine: &mut Engine) -> Status {
     dictcont(engine, "DICTUGETEXECZ", keyreader_from_uint, CALLX | STAY)
 }
-
+/* FIXME support prefix dict
 // (value key slice nbits - slice -1|0)
 pub(super) fn execute_pfxdictset(engine: &mut Engine) -> Status {
     pfxdictset(engine, "PFXDICTSET", 0)
@@ -1162,7 +1182,7 @@ pub(super) fn execute_pfxdictgetexec(engine: &mut Engine) -> Status {
 pub(super) fn execute_pfxdictswitch(engine: &mut Engine) -> Status {
     pfxdictget(engine, "PFXDICTSWITCH", CMD | SWITCH)
 }
-
+*/
 const QUIET: u8 = 0x01; // quiet variant
 const DICT:  u8 = 0x02; // dictionary
 const SLC:   u8 = 0x04; // slice
@@ -1174,15 +1194,17 @@ fn load_dict(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     )?;
     fetch_stack(engine, 1)?;
     let mut slice = engine.cmd.var(0).as_slice()?.clone();
-    let empty = if let Some(dict) = slice.get_dictionary_opt() {
+    let empty = if let Some(dict) = get_dictionary_opt(&mut slice)? {
         if how.bit(SLC) {
             engine.cc.stack.push(StackItem::Slice(dict));
         } else if how.bit(DICT) {
-            engine.cc.stack.push(if dict.is_empty_root() {
-                StackItem::None
-            } else {
-                StackItem::Cell(dict.reference(0)?)
-            });
+            engine.cc.stack.push(
+                if dict.as_ref().is_data_empty() || dict.as_ref().get_bit(0).ok() == Some(false) {
+                    StackItem::None
+                } else {
+                    StackItem::Cell(dict.as_ref().get_reference_cloned(0)?)
+                }
+            );
         }
         false
     } else {
@@ -1235,6 +1257,7 @@ pub(super) fn execute_plddictq(engine: &mut Engine) -> Status {
     load_dict(engine, "PLDDICTQ", DICT | QUIET)
 }
 
+/* FIXME support subdict
 type IntoSubtree = fn(&mut HashmapE, prefix: &SliceData, &mut dyn GasConsumer) -> Result<()>;
 fn subdict(engine: &mut Engine, name: &'static str, keyreader: KeyReader, into: IntoSubtree) -> Status {
     engine.load_instruction(
@@ -1279,6 +1302,7 @@ pub(super) fn execute_subdictirpget(engine: &mut Engine) -> Status {
 pub(super) fn execute_subdicturpget(engine: &mut Engine) -> Status {
     subdict(engine, "SUBDICTURPGET", keyreader_from_uint, HashmapSubtree::into_subtree_without_prefix)
 }
+*/
 pub(super) fn execute_dictgetoptref(engine: &mut Engine) -> Status {
     dict(engine, "DICTGETOPTREF", keyreader_from_slice, GET, valreader_from_refopt)
 }

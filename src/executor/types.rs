@@ -12,11 +12,12 @@
 */
 
 use crate::{
+    OwnedCellSlice,
     executor::math::DivMode,
-    stack::{StackItem, integer::IntegerData}
+    stack::{StackItem, integer::IntegerData},
+    types::Result
 };
 use std::{fmt, ops::Range};
-use ton_types::{error, Result, SliceData};
 
 macro_rules! param {
     ($self:ident, $id:ident) => {{
@@ -98,7 +99,7 @@ pub(super) enum InstructionParameter {
     Nargs(isize),
     Pargs(usize),
     Rargs(usize),
-    Slice(SliceData),
+    Slice(OwnedCellSlice),
     StackRegister(usize),
     StackRegisterPair(RegisterPair),
     StackRegisterTrio(RegisterTrio),
@@ -203,7 +204,7 @@ impl InstructionExt {
     pub(super) fn rargs_raw(&self) -> Option<usize> {
         param!(self, Rargs)
     }
-    pub(super) fn slice_raw(&self) -> Option<&SliceData> {
+    pub(super) fn slice_raw(&self) -> Option<&OwnedCellSlice> {
         param_ref!(self, Slice)
     }
     pub(super) fn sreg_raw(&self) -> Option<usize> {
@@ -252,7 +253,7 @@ impl InstructionExt {
     pub(super) fn rargs(&self) -> usize {
         self.rargs_raw().unwrap_or(0)
     }
-    pub(super) fn slice(&self) -> &SliceData {
+    pub(super) fn slice(&self) -> &OwnedCellSlice {
         self.slice_raw().unwrap()
     }
     pub(super) fn sreg(&self) -> usize {
@@ -363,9 +364,11 @@ impl InstructionExt {
                     self.sregs3_raw()?.rc,
                 ),
             Some(InstructionOptions::Bitstring(_, _, _, _)) =>
-                format!(" x{:X}", self.slice_raw()?),
+                format!(" x{}", self.slice_raw().map(|x|
+                    x.as_ref().display_data().to_string().to_ascii_uppercase())?),
             Some(InstructionOptions::Bytestring(_, _, _, _)) =>
-                format!(" x{:X}", self.slice_raw()?),
+                format!(" x{}", self.slice_raw().map(|x|
+                    x.as_ref().display_data().to_string().to_ascii_uppercase())?),
             Some(InstructionOptions::Dictionary(_, _)) =>
                 format!(" {}", self.length_raw()?),
             None => String::new()

@@ -12,6 +12,7 @@
 */
 
 use crate::{
+    error,
     error::TvmError,
     stack::{
         integer::{
@@ -23,10 +24,9 @@ use crate::{
         },
         serialization::{Deserializer, Serializer},
     },
-    types::Exception,
+    types::{Exception, ExceptionCode, Result},
 };
-use smallvec::SmallVec;
-use ton_types::{error, BuilderData, ExceptionCode, Result};
+use everscale_types::cell::CellBuilder;
 
 pub struct UnsignedIntegerLittleEndianEncoding {
     length_in_bits: usize
@@ -39,7 +39,7 @@ impl Encoding for UnsignedIntegerLittleEndianEncoding {
 }
 
 impl Serializer<IntegerData> for UnsignedIntegerLittleEndianEncoding {
-    fn try_serialize(&self, value: &IntegerData) -> Result<BuilderData> {
+    fn try_serialize(&self, value: &IntegerData, builder: &mut CellBuilder) -> Result<()> {
         if value.is_neg() || !value.ufits_in(self.length_in_bits)? {
             // Spec. 3.2.7
             // * If the integer x to be serialized is not in the range
@@ -55,7 +55,8 @@ impl Serializer<IntegerData> for UnsignedIntegerLittleEndianEncoding {
         debug_assert!(expected_buffer_size >= buffer.len());
         buffer.resize(expected_buffer_size, 0);
 
-        BuilderData::with_raw(SmallVec::from_vec(buffer), self.length_in_bits)
+        builder.store_raw(buffer.as_slice(), self.length_in_bits as u16)?;
+        Ok(())
     }
 }
 
@@ -64,7 +65,7 @@ impl Deserializer<IntegerData> for UnsignedIntegerLittleEndianEncoding {
         debug_assert!(data.len() * 8 >= self.length_in_bits);
 
         let value = num::BigInt::from_bytes_le(num::bigint::Sign::Plus, data);
-        IntegerData::from(value).unwrap_or_default()
+        IntegerData::from(value).unwrap_or_default() // FIXME neighbour impls do not use default
     }
 }
 

@@ -18,10 +18,9 @@ use crate::{
         microcode::{VAR, STACK, CC, CC_SAVELIST, CTRL, CTRL_SAVELIST, VAR_SAVELIST}
     },
     stack::{StackItem, continuation::ContinuationData, savelist::SaveList},
-    types::{Exception, ResultMut, ResultRef, Status}
+    types::{Result, ExceptionCode, Exception, ResultMut, ResultRef, Status}
 };
 use std::{mem, ops::Range};
-use ton_types::{error, fail, Result, types::ExceptionCode};
 use crate::executor::gas::gas_state::Gas;
 
 // Utilities ******************************************************************
@@ -328,12 +327,12 @@ pub(in crate::executor) fn pop_range(engine: &mut Engine, drop: Range<usize>, ds
     let save = drop.len();
     // pay for spliting stack
     if engine.cc.stack.depth() > save {
-        engine.try_use_gas(Gas::stack_price(save))?;
+        engine.gas_consumer.gas_mut().try_use_gas(Gas::stack_price(save))?;
     }
     // pay for concatination of stack
     let depth = continuation_by_address(engine, dst)?.stack.depth();
     if depth != 0 && save != 0 {
-        engine.try_use_gas(Gas::stack_price(save + depth))?;
+        engine.gas_consumer.gas_mut().try_use_gas(Gas::stack_price(save + depth))?;
     }
     move_stack_from_cc(engine, dst, drop)?;
     Ok(())

@@ -24,13 +24,13 @@ use crate::{
             utils::{unary_op, binary_op, process_double_result, construct_double_nan}
         }
     },
-    types::{Exception, Status}
+    types::{Exception, Status, Result, ExceptionCode}
 };
 use std::{cmp::Ordering, mem};
-use ton_types::{error, Result, types::{Bitmask, ExceptionCode}};
 
 // Common definitions *********************************************************
 
+type Bitmask = u8;
 type Binary = fn(&IntegerData, &IntegerData) -> Result<IntegerData>;
 type BinaryAssign = fn(&IntegerData, &mut IntegerData) -> Status;
 type BinaryConst = fn(isize, &IntegerData) -> Result<IntegerData>;

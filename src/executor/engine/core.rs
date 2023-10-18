@@ -11,42 +11,50 @@
 * limitations under the License.
 */
 
+use std::{ops::Range, sync::{Arc, Mutex}};
+
+use everscale_types::cell::{CellSlice, LoadMode};
+use everscale_types::dict::dict_get;
+use everscale_types::models::{GlobalCapabilities, GlobalCapability, LibDescr, ShardAccount, SimpleLib};
+use everscale_types::prelude::{Cell, CellBuilder, CellFamily, Dict, HashBytes};
+use num_traits::FromPrimitive;
+
+use crate::{
+    OwnedCellSlice,
+    types::{ExceptionCode, Result},
+    utils::get_dictionary_opt
+};
+
 use crate::{
     error::{tvm_exception_full, TvmError, update_error_description},
     executor::{
-        continuation::{switch, switch_to_c0}, engine::handlers::Handlers,
-        gas::gas_state::Gas, math::DivMode, microcode::{VAR, CTRL},
+        continuation::{switch, switch_to_c0}, engine::handlers::Handlers, gas::gas_state::Gas,
+        GasConsumer, math::DivMode, microcode::{CTRL, VAR},
         types::{
-            InstructionExt, Instruction, InstructionOptions, InstructionParameter, RegisterPair,
-            RegisterTrio, LengthAndIndex, WhereToGetParams,
+            Instruction, InstructionExt, InstructionOptions, InstructionParameter, LengthAndIndex,
+            RegisterPair, RegisterTrio, WhereToGetParams,
         }
     },
-    stack::{
-        Stack, StackItem, continuation::{ContinuationData, ContinuationType},
-        integer::IntegerData, savelist::SaveList
-    },
     smart_contract_info::SmartContractInfo,
-    types::{Exception, ResultMut, ResultOpt, ResultRef, Status}
+    stack::{
+        continuation::{ContinuationData, ContinuationType}, integer::IntegerData, savelist::SaveList,
+        Stack, StackItem
+    },
+    types::{Exception, ResultMut, ResultRef, Status}
 };
-use std::{sync::{Arc, Mutex}, ops::Range};
-use std::collections::{HashMap, HashSet};
-use ton_types::{
-    BuilderData, Cell, CellType, error, GasConsumer, Result, SliceData, HashmapE,
-    ExceptionCode, UInt256, IBitstring,
-};
-use ton_block::{ShardAccount, Deserializable, GlobalCapabilities};
+use crate::types::ResultOpt;
 
 pub(super) type ExecuteHandler = fn(&mut Engine) -> Status;
 
 pub trait IndexProvider: Send + Sync {
-    fn get_accounts_by_init_code_hash(&self, hash: &UInt256) -> Result<Vec<ShardAccount>>;
-    fn get_accounts_by_code_hash(&self, hash: &UInt256) -> Result<Vec<ShardAccount>>;
-    fn get_accounts_by_data_hash(&self, hash: &UInt256) -> Result<Vec<ShardAccount>>;
+    fn get_accounts_by_init_code_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
+    fn get_accounts_by_code_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
+    fn get_accounts_by_data_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
 }
 
 pub(super) struct SliceProto {
-    data_window: Range<usize>,
-    references_window: Range<usize>,
+    data_window: Range<u16>,
+    references_window: Range<u8>,
 }
 
 impl Default for SliceProto {
@@ -59,16 +67,16 @@ impl Default for SliceProto {
 }
 
 impl SliceProto {
-    fn pos(&self) -> usize {
+    fn bits_offset(&self) -> u16 {
         self.data_window.start
     }
 }
 
-impl From<&SliceData> for SliceProto {
-    fn from(slice: &SliceData) -> Self {
+impl<'a> From<&CellSlice<'a>> for SliceProto {
+    fn from(slice: &CellSlice<'a>) -> Self {
         Self {
-            data_window: slice.pos()..slice.pos() + slice.remaining_bits(),
-            references_window: slice.get_references(),
+            data_window: slice.bits_offset() ..(slice.bits_offset() + slice.remaining_bits()),
+            references_window: slice.refs_offset() ..(slice.refs_offset() + slice.remaining_refs())
         }
     }
 }
@@ -79,16 +87,11 @@ pub struct Engine {
     pub(in crate::executor) cc: ContinuationData,
     pub(in crate::executor) cmd: InstructionExt,
     pub(in crate::executor) ctrls: SaveList,
-    pub(in crate::executor) libraries: Vec<HashmapE>, // 256 bit dictionaries
     pub(in crate::executor) index_provider: Option<Arc<dyn IndexProvider>>,
     pub(in crate::executor) modifiers: BehaviorModifiers,
-    // SliceData::load_cell() is faster than trying to cache SliceData for each
-    // visited cell with HashMap<UInt256, SliceData>
-    visited_cells: HashSet<UInt256>,
-    visited_exotic_cells: HashMap<UInt256, SliceData>,
+    pub(in crate::executor) gas_consumer: GasConsumer,
     cstate: CommittedState,
     time: u64,
-    gas: Gas,
     code_page: isize,
     debug_on: isize, // status of debug can be recursively incremented
     step: u32, // number of executable command
@@ -99,7 +102,6 @@ pub struct Engine {
     trace_callback: Option<Arc<TraceCallback>>,
     log_string: Option<&'static str>,
     flags: u64,
-    capabilities: u64,
     block_version: u32,
     signature_id: i32,
 }
@@ -123,7 +125,7 @@ pub struct EngineTraceInfo<'a> {
     pub info_type: EngineTraceInfoType,
     pub step: u32, // number of executable command
     pub cmd_str: String,
-    pub cmd_code: SliceData, // start of current cmd
+    pub cmd_code: OwnedCellSlice, // start of current cmd
     pub stack: &'a Stack,
     pub gas_used: i64,
     pub gas_cmd: i64,
@@ -135,7 +137,6 @@ impl<'a> EngineTraceInfo<'a> {
     }
 }
 
-#[derive(Debug)]
 pub struct CommittedState {
     c4: StackItem,
     c5: StackItem,
@@ -173,22 +174,6 @@ impl CommittedState {
     }
 }
 
-impl GasConsumer for Engine {
-    fn finalize_cell(&mut self, builder: BuilderData) -> Result<Cell> {
-        self.use_gas(Gas::finalize_price());
-        builder
-            .finalize(1024)
-            .map_err(|err| exception!(ExceptionCode::CellOverflow, "finalize cell error: {}", err))
-    }
-    fn load_cell(&mut self, cell: Cell) -> Result<SliceData> {
-        self.load_hashed_cell(cell, true)
-    }
-    fn finalize_cell_and_load(&mut self, builder: BuilderData) -> Result<SliceData> {
-        let cell = self.finalize_cell(builder)?;
-        self.load_hashed_cell(cell, true)
-    }
-}
-
 lazy_static::lazy_static! {
     static ref HANDLERS_CP0: Handlers = Handlers::new_code_page_0();
 }
@@ -207,7 +192,7 @@ impl Engine {
 
     // External API ***********************************************************
 
-    pub fn with_capabilities(capabilities: u64) -> Engine {
+    pub fn with_capabilities(capabilities: GlobalCapabilities) -> Engine {
         let trace = if cfg!(feature="fift_check") {
             Engine::TRACE_ALL_BUT_CTRLS
         } else if cfg!(feature="verbose") {
@@ -233,14 +218,11 @@ impl Engine {
             cc: ContinuationData::new_empty(),
             cmd: InstructionExt::new("NOP"),
             ctrls: SaveList::new(),
-            libraries: Vec::new(),
             index_provider: None,
             modifiers: BehaviorModifiers::default(),
-            visited_cells: HashSet::new(),
-            visited_exotic_cells: HashMap::new(),
+            gas_consumer: GasConsumer::new(capabilities),
             cstate: CommittedState::new_empty(),
             time: 0,
-            gas: Gas::empty(),
             code_page: 0,
             debug_on: 1,
             step: 0,
@@ -251,7 +233,6 @@ impl Engine {
             trace_callback,
             log_string: None,
             flags: 0,
-            capabilities,
             block_version: 0,
             signature_id: 0,
         }
@@ -278,16 +259,12 @@ impl Engine {
         self
     }
 
-    pub fn check_capabilities(&self, capabilities: u64) -> bool {
-        (self.capabilities & capabilities) == capabilities
+    pub fn has_capability(&self, capability: GlobalCapability) -> bool {
+        self.gas_consumer.has_capability(capability)
     }
 
-    pub fn check_capability(&self, capability: GlobalCapabilities) -> Status {
-        if (self.capabilities & capability as u64) == 0 {
-            err!(ExceptionCode::InvalidOpcode, "{:?} is absent", capability)
-        } else {
-            Ok(())
-        }
+    pub fn check_capability(&self, capability: GlobalCapability) -> Status {
+        self.gas_consumer.check_capability(capability)
     }
 
     pub fn block_version(&self) -> u32 {
@@ -313,23 +290,6 @@ impl Engine {
 
     pub fn stack(&self) -> &Stack {
         &self.cc.stack
-    }
-
-    pub fn try_use_gas(&mut self, gas: i64) -> Result<()> {
-        self.gas.try_use_gas(gas)?;
-        Ok(())
-    }
-
-    pub fn use_gas(&mut self, gas: i64) -> i64 {
-        self.gas.use_gas(gas)
-    }
-
-    pub fn gas_used(&self) -> i64 {
-        self.gas.get_gas_used_full()
-    }
-
-    pub fn gas_remaining(&self) -> i64 {
-        self.gas.get_gas_remaining()
     }
 
     pub fn withdraw_stack(&mut self) -> Stack {
@@ -373,10 +333,10 @@ impl Engine {
                 info_type,
                 step: self.step,
                 cmd_str,
-                cmd_code: self.cmd_code().unwrap_or_default(),
+                cmd_code: self.cmd_code().unwrap_or(OwnedCellSlice::empty()),
                 stack: &self.cc.stack,
-                gas_used: self.gas_used(),
-                gas_cmd: self.gas_used() - gas,
+                gas_used: self.gas_consumer.gas().used(),
+                gas_cmd: self.gas_consumer.gas().used() - gas,
             };
             trace_callback(self, &info);
         }
@@ -483,14 +443,14 @@ impl Engine {
                     Err(err) => err.to_string()
                 },
                 StackItem::Cell(data) => {
-                    format!("C{}-{}", data.bit_length(), data.references_count())
+                    format!("C{}-{}", data.bit_len(), data.reference_count())
                 }
-                StackItem::Continuation(data) => format!("T{}", data.code().remaining_bits() / 8),
+                StackItem::Continuation(data) => format!("T{}", data.code().as_ref().remaining_bits() / 8),
                 StackItem::Builder(data) => {
-                    format!("B{}-{}", data.length_in_bits(), data.references().len())
+                    format!("B{}-{}", data.bit_len(), data.references().len())
                 }
                 StackItem::Slice(data) => {
-                    format!("S{}-{}", data.remaining_bits(), data.remaining_references())
+                    format!("S{}-{}", data.as_ref().remaining_bits(), data.as_ref().remaining_refs())
                 }
                 StackItem::Tuple(data) => match data.len() {
                     0 => "[]".to_string(),
@@ -553,8 +513,8 @@ impl Engine {
             if let Some(result) = self.seek_next_cmd()? {
                 break result
             }
-            let gas = self.gas_used();
-            self.cmd_code = SliceProto::from(self.cc.code());
+            let gas = self.gas_consumer.gas().used();
+            self.cmd_code = SliceProto::from(self.cc.code().as_ref());
             let execution_result = match HANDLERS_CP0.get_handler(self) {
                 Err(err) => {
                     self.basic_use_gas(8);
@@ -567,21 +527,21 @@ impl Engine {
                                 format!("CMD: {}{} err: {}", self.cmd.proto.name_prefix.unwrap_or_default(), self.cmd.proto.name, e)
                             ))
                         }
-                        Ok(_) => self.gas.check_gas_remaining().err(),
+                        Ok(_) => self.gas_consumer.gas().check_gas_remaining().err(),
                     }
                 }
             };
             self.trace_info(EngineTraceInfoType::Normal, gas, None);
             self.cmd.clear();
             if let Some(err) = execution_result {
-                if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+                if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
                     self.raise_exception_bugfix0(err)?;
                 } else {
                     self.raise_exception(err)?;
                 }
             }
         };
-        self.trace_info(EngineTraceInfoType::Finish, self.gas_used(), Some("NORMAL TERMINATION".to_string()));
+        self.trace_info(EngineTraceInfoType::Finish, self.gas_consumer.gas().used(), Some("NORMAL TERMINATION".to_string()));
         self.commit();
         Ok(result)
     }
@@ -589,15 +549,15 @@ impl Engine {
     fn step_next_ref(&mut self, reference: Cell) -> Result<Option<i32>> {
         self.step += 1;
         self.log_string = Some("IMPLICIT JMPREF");
-        self.try_use_gas(Gas::implicit_jmp_price())?;
-        let code = self.load_hashed_cell(reference, true)?;
-        *self.cc.code_mut() = code;
+        self.gas_consumer.gas_mut().try_use_gas(Gas::implicit_jmp_price())?;
+        let code = self.gas_consumer.ctx(|c| c.load_cell(reference, LoadMode::Full))?;
+        *self.cc.code_mut() = OwnedCellSlice::new(code)?;
         Ok(None)
     }
     fn step_ordinary(&mut self) -> Result<Option<i32>> {
         self.step += 1;
         self.log_string = Some("implicit RET");
-        self.try_use_gas(Gas::implicit_ret_price())?;
+        self.gas_consumer.gas_mut().try_use_gas(Gas::implicit_ret_price())?;
         if self.ctrls.get(0).is_none() {
             return Ok(Some(0))
         }
@@ -614,7 +574,7 @@ impl Engine {
     fn step_try_catch(&mut self) -> Result<Option<i32>> {
         self.step += 1;
         self.log_string = Some("IMPLICIT RET FROM TRY-CATCH");
-        self.try_use_gas(Gas::implicit_ret_price())?;
+        self.gas_consumer.gas_mut().try_use_gas(Gas::implicit_ret_price())?;
         self.ctrls.remove(2);
         switch(self, ctrl!(0))?;
         Ok(None)
@@ -637,7 +597,7 @@ impl Engine {
         switch(self, ctrl!(0))?;
         Ok(None)
     }
-    fn step_while_loop(&mut self, body: SliceData, cond: SliceData) -> Result<Option<i32>> {
+    fn step_while_loop(&mut self, body: OwnedCellSlice, cond: OwnedCellSlice) -> Result<Option<i32>> {
         match self.check_while_loop_condition() {
             Ok(true) => {
                 self.log_string = Some("NEXT WHILE ITERATION");
@@ -653,7 +613,7 @@ impl Engine {
                 switch(self, ctrl!(0))?;
             }
             Err(err) => {
-                if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+                if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
                     let quit = ContinuationType::Quit(ExceptionCode::NormalTermination as i32);
                     self.ctrls.put(0, &mut StackItem::continuation(ContinuationData::with_type(quit)))?;
                 }
@@ -662,7 +622,7 @@ impl Engine {
         }
         Ok(None)
     }
-    fn step_repeat_loop(&mut self, body: SliceData) -> Result<Option<i32>> {
+    fn step_repeat_loop(&mut self, body: OwnedCellSlice) -> Result<Option<i32>> {
         if let ContinuationType::RepeatLoopBody(_, ref mut counter) = self.cc.type_of {
             if *counter > 1 {
                 *counter -= 1;
@@ -678,7 +638,7 @@ impl Engine {
         }
         Ok(None)
     }
-    fn step_until_loop(&mut self, body: SliceData) -> Result<Option<i32>> {
+    fn step_until_loop(&mut self, body: OwnedCellSlice) -> Result<Option<i32>> {
         match self.check_until_loop_condition() {
             Ok(true) => {
                 self.log_string = Some("NEXT UNTIL ITERATION");
@@ -695,7 +655,7 @@ impl Engine {
         }
         Ok(None)
     }
-    fn step_again_loop(&mut self, body: SliceData) -> Result<Option<i32>> {
+    fn step_again_loop(&mut self, body: OwnedCellSlice) -> Result<Option<i32>> {
         self.log_string = Some("NEXT AGAIN ITERATION");
         self.discharge_nargs();
         let again = ContinuationData::move_without_stack(&mut self.cc, body);
@@ -704,7 +664,7 @@ impl Engine {
     }
 
     fn discharge_nargs(&mut self) {
-        if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) && self.cc.nargs != -1 {
+        if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) && self.cc.nargs != -1 {
             let depth = self.cc.stack.depth();
             let _ = self.cc.stack.drop_range_straight((depth - self.cc.nargs as usize)..depth);
             self.cc.nargs = -1;
@@ -730,10 +690,10 @@ impl Engine {
 
     // return Ok(Some(exit_code)) - if you want to stop execution
     pub(in crate::executor) fn seek_next_cmd(&mut self) -> Result<Option<i32>> {
-        while self.cc.code().remaining_bits() == 0 {
-            let gas = self.gas_used();
+        while self.cc.code().as_ref().remaining_bits() == 0 {
+            let gas = self.gas_consumer.gas().used();
             self.log_string = None;
-            let result = if let Some(reference) = self.cc.code().reference_opt(0) {
+            let result = if let Some(reference) = self.cc.code().as_ref().get_reference_cloned(0).ok() {
                 self.step_next_ref(reference)
             } else {
                 match self.cc.type_of.clone() {
@@ -754,11 +714,11 @@ impl Engine {
                     self.trace_info(EngineTraceInfoType::Implicit, gas, Some(log_string.to_string()));
                 }
             }
-            match self.gas.check_gas_remaining().and(result) {
+            match self.gas_consumer.gas().check_gas_remaining().and(result) {
                 Ok(None) => (),
                 Ok(Some(exit_code)) => return Ok(Some(exit_code)),
                 Err(err) => {
-                    if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+                    if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
                         match self.raise_exception_bugfix0(err) {
                             Ok(Some(exit_code)) => return Ok(Some(exit_code)),
                             Ok(None) => (),
@@ -773,98 +733,6 @@ impl Engine {
         Ok(None)
     }
 
-
-    pub fn load_library_cell(&mut self, cell: Cell) -> Result<Cell> {
-        self.check_capability(GlobalCapabilities::CapSetLibCode)?;
-        let mut hash = SliceData::load_cell(cell)?;
-        hash.move_by(8)?;
-        for library in self.libraries.clone() {
-            if let Some(lib_bucket) = library.get_with_gas(hash.clone(), self)? {
-                let lib = lib_bucket.reference(0)?;
-                if lib.repr_hash() != hash {
-                    return err!(ExceptionCode::DictionaryError, "Librariy hash does not correspond to map key {:x}", hash)
-                }
-                return Ok(lib);
-            }
-        }
-        err!(ExceptionCode::CellUnderflow, "Libraries do not contain code with hash {:x}", hash)
-    }
-
-    /// Loads cell to slice checking in precashed map
-    pub fn load_hashed_cell(&mut self, mut cell: Cell, resolve_special: bool) -> Result<SliceData> {
-        let mut previous_hashes = Vec::new();
-        let slice = loop {
-            let hash = cell.repr_hash();
-            if !resolve_special || cell.cell_type() == CellType::Ordinary {
-                if self.visited_cells.contains(&hash) {
-                    self.try_use_gas(Gas::load_cell_price(false))?;
-                    break SliceData::load_cell(cell)?;
-                } else {
-                    self.try_use_gas(Gas::load_cell_price(true))?;
-                    self.visited_cells.insert(hash);
-                    break SliceData::load_cell(cell)?;
-                }
-            }
-            if let Some(slice) = self.visited_exotic_cells.get(&hash).cloned() {
-                self.try_use_gas(Gas::load_cell_price(false))?;
-                break slice;
-            }
-            previous_hashes.push(hash);
-            match cell.cell_type() {
-                CellType::LibraryReference => {
-                    self.try_use_gas(Gas::load_cell_price(true))?;
-                    cell = self.load_library_cell(cell)?;
-                    continue;
-                }
-                CellType::MerkleProof => {
-                    if self.check_capabilities(GlobalCapabilities::CapResolveMerkleCell as u64) {
-                        self.try_use_gas(Gas::load_cell_price(true))?;
-                        let mut slice = SliceData::load_cell(cell.clone())?;
-                        slice.move_by(8)?;
-                        let hash = slice.get_next_hash()?;
-                        cell = cell.reference(0)?.virtualize(1);
-                        if cell.repr_hash() != hash {
-                            return err!(
-                                ExceptionCode::CellUnderflow,
-                                "hash of merkle proof cell is not corresponded to child cell"
-                            )
-                        }
-                        continue
-                    }
-                }
-                CellType::MerkleUpdate => {
-                    if self.check_capabilities(GlobalCapabilities::CapResolveMerkleCell as u64) {
-                        self.try_use_gas(Gas::load_cell_price(true))?;
-                        let mut slice = SliceData::load_cell(cell.clone())?;
-                        slice.move_by(8)?;
-                        let hash = slice.get_next_hash()?;
-                        if cell.reference(0)?.virtualize(1).repr_hash() != hash {
-                            return err!(
-                                ExceptionCode::CellUnderflow,
-                                "hash of merkle update cell is not corresponded to child cell"
-                            )
-                        }
-                        slice.move_by(16)?;
-                        let hash = slice.get_next_hash()?;
-                        cell = cell.reference(1)?.virtualize(1);
-                        if cell.repr_hash() != hash {
-                            return err!(
-                                ExceptionCode::CellUnderflow,
-                                "hash of merkle update cell is not corresponded to child cell"
-                            )
-                        }
-                        continue
-                    }
-                }
-                _ => ()
-            }
-            return err!(ExceptionCode::CellUnderflow, "Wrong resolving cell type {}", cell.cell_type())
-        };
-        for hash in previous_hashes {
-            self.visited_exotic_cells.insert(hash, slice.clone());
-        }
-        Ok(slice)
-    }
 
     pub fn get_committed_state(&self) -> &CommittedState {
         &self.cstate
@@ -962,44 +830,46 @@ impl Engine {
         &self.modifiers
     }
 
-    pub fn modify_behavior(&mut self, modifiers: BehaviorModifiers) {
-        self.modifiers = modifiers;
+    pub fn modify_behavior(&mut self, modifiers: &BehaviorModifiers) {
+        self.modifiers = modifiers.clone();
     }
 
-    pub fn setup(self, code: SliceData, ctrls: Option<SaveList>, stack: Option<Stack>, gas: Option<Gas>) -> Self {
-        self.setup_with_libraries(code, ctrls, stack, gas, vec![])
+    pub fn set_libraries(
+        &mut self,
+        account_libs: &Dict<HashBytes, SimpleLib>,
+        shared_libs: &Dict<HashBytes, LibDescr>
+    ) -> Result<()> {
+        Ok(self.gas_consumer.set_libraries(account_libs, shared_libs)?)
     }
 
-    pub fn setup_with_libraries(
+    pub fn setup(
         mut self,
-        code: SliceData,
+        code: OwnedCellSlice,
         mut ctrls: Option<SaveList>,
         stack: Option<Stack>,
-        gas: Option<Gas>,
-        libraries: Vec<HashmapE>
-    ) -> Self {
+        gas: Gas,
+    ) -> Result<Self> {
         *self.cc.code_mut() = code.clone();
-        self.cmd_code = SliceProto::from(self.cc.code());
+        self.cmd_code = SliceProto::from(self.cc.code().as_ref());
         if let Some(stack) = stack {
             self.cc.stack = stack;
         }
-        self.gas = gas.unwrap_or_else(Gas::test);
+        *self.gas_consumer.gas_mut() = gas;
         let cont = ContinuationType::Quit(ExceptionCode::NormalTermination as i32);
-        self.ctrls.put(0, &mut StackItem::continuation(ContinuationData::with_type(cont))).unwrap();
+        self.ctrls.put(0, &mut StackItem::continuation(ContinuationData::with_type(cont)))?;
         let cont = ContinuationType::Quit(ExceptionCode::AlternativeTermination as i32);
-        self.ctrls.put(1, &mut StackItem::continuation(ContinuationData::with_type(cont))).unwrap();
-        if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
-            self.ctrls.put(2, &mut StackItem::continuation(ContinuationData::with_type(ContinuationType::ExcQuit))).unwrap();
+        self.ctrls.put(1, &mut StackItem::continuation(ContinuationData::with_type(cont)))?;
+        if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
+            self.ctrls.put(2, &mut StackItem::continuation(ContinuationData::with_type(ContinuationType::ExcQuit)))?;
         }
-        self.ctrls.put(3, &mut StackItem::continuation(ContinuationData::with_code(code.clone()))).unwrap();
-        self.ctrls.put(4, &mut StackItem::cell(Cell::default())).unwrap();
-        self.ctrls.put(5, &mut StackItem::cell(Cell::default())).unwrap();
-        self.ctrls.put(7, &mut SmartContractInfo::old_default(code.into_cell()).into_temp_data_item()).unwrap();
+        self.ctrls.put(3, &mut StackItem::continuation(ContinuationData::with_code(code.clone())))?;
+        self.ctrls.put(4, &mut StackItem::cell(Cell::empty_cell()))?;
+        self.ctrls.put(5, &mut StackItem::cell(Cell::empty_cell()))?;
+        self.ctrls.put(7, &mut SmartContractInfo::old_default(code.into_cell()?).into_temp_data_item())?;
         if let Some(ref mut ctrls) = ctrls {
             self.ctrls.apply(ctrls);
         }
-        self.libraries = libraries;
-        self
+        Ok(self)
     }
 
     // Internal API ***********************************************************
@@ -1045,17 +915,9 @@ impl Engine {
         }
     }
 
-    ///Get gas state
-    pub fn get_gas(&self) -> &Gas {
-        &self.gas
-    }
-    ///Set gas state
-    pub fn set_gas(&mut self, gas: Gas) {
-        self.gas = gas
-    }
-    ///Interface to gas state set_gas_limit method
-    pub fn new_gas_limit(&mut self, gas: i64) {
-        self.gas.new_gas_limit(gas)
+    /// Get gas state outside of VM, for executor
+    pub fn gas(&self) -> &Gas {
+        &self.gas_consumer.gas()
     }
 
     fn check_while_loop_condition(&mut self) -> Result<bool> {
@@ -1068,38 +930,44 @@ impl Engine {
         Ok(!self.check_while_loop_condition()?)
     }
 
-    fn extract_slice(&mut self, offset: usize, r: usize, x: usize, mut refs: usize, mut bytes: usize) -> Result<SliceData> {
+    fn extract_slice(&mut self, offset: usize, r: usize, x: usize, refs: usize, bytes: usize) -> Result<OwnedCellSlice> {
+        let offset = offset as u16;
+        let r = r as u16;
+        let x = x as u16;
+        let mut refs = refs as u8;
+        let mut bytes = bytes as u16;
+
         let mut code = self.cmd_code()?;
         let mut slice = code.clone();
-        if offset >= slice.remaining_bits() {
+        if offset >= slice.as_ref().remaining_bits() {
             return err!(ExceptionCode::InvalidOpcode)
         }
-        slice.shrink_data(offset..);
+        slice.as_mut().advance(offset, 0)?;
         if r != 0 {
-            refs += slice.get_next_int(r)? as usize;
+            refs += slice.as_mut().load_uint(r)? as u8;
         }
         if x != 0 {
-            bytes += slice.get_next_int(x)? as usize;
+            bytes += slice.as_mut().load_uint(x)? as u16;
         }
         let mut shift = 8 * bytes + offset + r + x + 7;
         let remainder = shift % 8;
         shift -= remainder;
-        if (slice.remaining_bits() < shift - r - x - offset) || (slice.remaining_references() < refs) {
+        if (slice.as_ref().remaining_bits() < shift - r - x - offset)
+            || (slice.as_ref().remaining_refs() < refs) {
             return err!(ExceptionCode::InvalidOpcode)
         }
-        code.shrink_data(shift..);
-        code.shrink_references(refs..);
+        code.as_mut().advance(shift, refs)?;
         *self.cc.code_mut() = code;
 
-        slice.shrink_data(..shift - r - x - offset);
-        slice.shrink_references(..refs);
+        slice.as_mut().shrink(Some(shift - r - x - offset), Some(refs))?;
 
         Ok(slice)
     }
 
     fn basic_use_gas(&mut self, mut bits: usize) -> i64 {
-        bits += self.cc.code().pos().saturating_sub(self.cmd_code.pos());
-        self.use_gas(Gas::basic_gas_price(bits, 0))
+        let higher = self.cc.code().as_ref().bits_offset();
+        bits += higher.saturating_sub(self.cmd_code.bits_offset()) as usize;
+        self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(bits, 0))
     }
 
     fn extract_instruction(&mut self) -> Status {
@@ -1375,28 +1243,28 @@ impl Engine {
                 )
             }
             Some(InstructionOptions::Dictionary(offset, bits)) => {
-                self.use_gas(Gas::basic_gas_price(offset + 1 + bits, 0));
+                self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(offset + 1 + bits, 0));
                 let mut code = self.cmd_code()?;
-                code.shrink_data(offset..);
+                code.as_mut().advance(offset as u16, 0)?;
                 // TODO: need to check this failure case
-                let slice = code.get_dictionary_opt().unwrap_or_default();
+                let slice = get_dictionary_opt(&mut code).ok().flatten().unwrap_or(OwnedCellSlice::empty());
                 self.cmd.params.push(InstructionParameter::Slice(slice));
-                let length = code.get_next_int(bits)? as usize;
+                let length = code.as_mut().load_uint(bits as u16)? as usize;
                 *self.cc.code_mut() = code;
                 self.cmd.params.push(InstructionParameter::Length(length))
             }
             Some(InstructionOptions::Bytestring(offset, r, x, bytes)) => {
-                self.use_gas(Gas::basic_gas_price(offset + r + x, 0));
+                self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(offset + r + x, 0));
                 let slice = self.extract_slice(offset, r, x, 0, bytes)?;
-                if slice.remaining_bits() % 8 != 0 {
+                if slice.as_ref().remaining_bits() % 8 != 0 {
                     return err!(ExceptionCode::InvalidOpcode)
                 }
                 self.cmd.params.push(InstructionParameter::Slice(slice))
             }
             Some(InstructionOptions::Bitstring(offset, r, x, refs)) => {
-                self.use_gas(Gas::basic_gas_price(offset + r + x, 0));
+                self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(offset + r + x, 0));
                 let mut slice = self.extract_slice(offset, r, x, refs, 0)?;
-                slice.trim_right();
+                Self::rtrim_slice(&mut slice)?;
                 self.cmd.params.push(InstructionParameter::Slice(slice));
             }
             None => { self.basic_use_gas(0); }
@@ -1421,7 +1289,7 @@ impl Engine {
             log::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
             return Err(err)
         }
-        if let Err(err) = self.gas.try_use_gas(Gas::exception_price()) {
+        if let Err(err) = self.gas_consumer.gas_mut().try_use_gas(Gas::exception_price()) {
             self.step += 1;
             return Err(err);
         }
@@ -1440,7 +1308,7 @@ impl Engine {
             switch(self, var!(n))?;
         } else {
             let log_string = Some(format!("UNHANDLED EXCEPTION: {}", err));
-            self.trace_info(EngineTraceInfoType::Exception, self.gas_used(), log_string);
+            self.trace_info(EngineTraceInfoType::Exception, self.gas_consumer.gas().used(), log_string);
             return Err(err)
         }
         Ok(())
@@ -1463,7 +1331,7 @@ impl Engine {
             log::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
             return Err(err)
         }
-        if let Err(err) = self.gas.try_use_gas(Gas::exception_price()) {
+        if let Err(err) = self.gas_consumer.gas_mut().try_use_gas(Gas::exception_price()) {
             self.step += 1;
             return Err(err);
         }
@@ -1502,12 +1370,26 @@ impl Engine {
         Ok(None)
     }
 
+    /// trim zeros from right to first one
+    fn rtrim_slice(slice: &mut OwnedCellSlice) -> Result<()> {
+        let s = slice.as_ref();
+        let mut remaining_bits = s.remaining_bits();
+        for offset in (0..remaining_bits).rev() {
+            if s.get_bit(offset).ok() == Some(true) {
+                remaining_bits = offset;
+                break
+            }
+        }
+        slice.as_mut().shrink(Some(remaining_bits), None)?;
+        Ok(())
+    }
+
     pub(in crate::executor) fn last_cmd(&self) -> u8 {
         self.last_cmd
     }
 
     pub(in crate::executor) fn next_cmd(&mut self) -> Result<u8> {
-        match self.cc.code_mut().get_next_byte() {
+        match self.cc.code_mut().as_mut().load_u8() {
             Ok(cmd) => {
                 self.last_cmd = cmd;
                 Ok(cmd)
@@ -1515,7 +1397,7 @@ impl Engine {
             Err(_) => err!(
                 ExceptionCode::InvalidOpcode,
                 "remaining bits expected >= 8, but actual value is: {}",
-                self.cc.code().remaining_bits()
+                self.cc.code().as_ref().remaining_bits()
             )
         }
     }
@@ -1526,12 +1408,12 @@ impl Engine {
             Err(err) => err.to_string()
         }
     }
-    fn cmd_code(&self) -> Result<SliceData> {
-        let mut code = SliceData::load_cell_ref(self.cc.code().cell())?;
+    fn cmd_code(&self) -> Result<OwnedCellSlice> {
+        let mut code = OwnedCellSlice::new(self.cc.code().cell().clone())?;
         let data = &self.cmd_code.data_window;
-        code.shrink_data(data.start..data.end);
         let refs = &self.cmd_code.references_window;
-        code.shrink_references(refs.start..refs.end);
+        code.as_mut().advance(data.start, refs.start)?;
+        code.as_mut().shrink(Some(data.end - data.start), Some(refs.end - refs.start))?;
         Ok(code)
     }
 
@@ -1565,29 +1447,22 @@ impl Engine {
             Some(v) => *v = StackItem::int(rand),
             None => return err!(ExceptionCode::RangeCheckError, "set tuple index is {} but length is {}", 6, t1_items.len())
         }
-        self.use_gas(Gas::tuple_gas_price(t1_items.len()));
+        self.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(t1_items.len()));
         *t1 = StackItem::tuple(t1_items);
-        self.use_gas(Gas::tuple_gas_price(tuple.len()));
+        self.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(tuple.len()));
         *self.ctrl_mut(7)? = StackItem::tuple(tuple);
         Ok(())
     }
 
     pub(crate) fn get_config_param(&mut self, index: i32) -> ResultOpt<Cell> {
-        if let StackItem::Cell(data) = self.smci_param(9)? {
-            let params = HashmapE::with_hashmap(32, Some(data.clone()));
-            let mut key = BuilderData::new();
-            key.append_i32(index)?;
-            if let Some(value) = params.get_with_gas(SliceData::load_builder(key)?, self)? {
-                return Ok(value.reference_opt(0))
-            }
-        }
-        Ok(None)
-    }
-
-    pub(crate) fn read_config_param<T: Deserializable>(&mut self, index: i32) -> Result<T> {
-        match self.get_config_param(index)? {
-            Some(cell) => T::construct_from_cell(cell),
-            None => err!("Cannot get config param {}", index)
-        }
+        let StackItem::Cell(ref data) = self.smci_param(9)?.clone() else {
+            return Ok(None)
+        };
+        let mut builder = CellBuilder::new();
+        builder.store_u32(index as u32)?;
+        let Some(cell) = self.gas_consumer.ctx(|c| dict_get(Some(&data), 32, builder.as_data_slice(), c))? else {
+            return Ok(None)
+        };
+        Ok(cell.get_reference_cloned(0).map(Some)?)
     }
 }

@@ -18,10 +18,9 @@ use crate::{
         types::{InstructionOptions, Instruction, WhereToGetParams}
     },
     stack::{StackItem, integer::IntegerData},
-    types::{Exception, Status}
+    types::{ExceptionCode, Exception, Status}
 };
-use ton_block::GlobalCapabilities;
-use ton_types::{error, fail, ExceptionCode};
+use everscale_types::models::GlobalCapability;
 
 fn tuple(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     let mut inst = Instruction::new(name);
@@ -39,7 +38,7 @@ fn tuple(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     let vars = engine.cmd.var_count();
     let mut tuple = engine.cmd.vars.split_off(vars - params);
     tuple.reverse();
-    engine.use_gas(Gas::tuple_gas_price(tuple.len()));
+    engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(tuple.len()));
     engine.cc.stack.push_tuple(tuple);
     Ok(())
 }
@@ -173,7 +172,7 @@ fn untuple(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     if how.mask(CMP) == MORE {
         n = len;
     }
-    engine.use_gas(Gas::tuple_gas_price(n));
+    engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(n));
     let mut vars = engine.cmd.var_mut(params - 1).withdraw_tuple_part(n)?;
     vars.drain(..).for_each(|v| {engine.cc.stack.push(v);});
     if how.bit(COUNT) {
@@ -222,7 +221,7 @@ pub(super) fn execute_tuple_explodevar(engine: &mut Engine) -> Status {
 }
 
 fn set_index(engine: &mut Engine, name: &'static str, how: u8) -> Status {
-    if engine.check_capabilities(GlobalCapabilities::CapFixTupleIndexBug as u64) {
+    if engine.has_capability(GlobalCapability::CapFixTupleIndexBug) {
         set_index_v2(engine, name, how)
     } else {
         set_index_v1(engine, name, how)
@@ -257,12 +256,12 @@ fn set_index_v2(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     let len = tuple.len();
     if n < len {
         tuple[n] = var;
-        engine.use_gas(Gas::tuple_gas_price(len));
+        engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(len));
     } else if how.bit(QUIET) {
         if !var.is_null() {
             tuple.append(&mut vec![StackItem::None; n - len]);
             tuple.push(var);
-            engine.use_gas(Gas::tuple_gas_price(n + 1));
+            engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(n + 1));
         }
     } else {
         return err!(ExceptionCode::RangeCheckError, "set_index failed {} >= {}", n, len)
@@ -307,7 +306,7 @@ fn set_index_v1(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         return err!(ExceptionCode::RangeCheckError, "set_index failed {} >= {}", n, len)
     }
     if !value_is_null {
-        engine.use_gas(Gas::tuple_gas_price(tuple.len()));
+        engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(tuple.len()));
     }
     engine.cc.stack.push_tuple(tuple);
     Ok(())
@@ -378,7 +377,7 @@ pub(super) fn execute_tuple_push(engine: &mut Engine) -> Status {
     let mut tuple = engine.cmd.var_mut(1).as_tuple_mut()?;
     let value = engine.cmd.var(0).clone();
     tuple.push(value);
-    engine.use_gas(Gas::tuple_gas_price(tuple.len()));
+    engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(tuple.len()));
     engine.cc.stack.push_tuple(tuple);
     Ok(())
 }
@@ -389,7 +388,7 @@ pub(super) fn execute_tuple_pop(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let mut tuple = engine.cmd.var_mut(0).as_tuple_mut()?;
     let value = tuple.pop().ok_or(ExceptionCode::TypeCheckError)?;
-    engine.use_gas(Gas::tuple_gas_price(tuple.len()));
+    engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(tuple.len()));
     engine.cc.stack.push_tuple(tuple);
     engine.cc.stack.push(value);
     Ok(())

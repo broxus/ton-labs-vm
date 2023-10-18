@@ -13,8 +13,80 @@
 
 use crate::stack::{StackItem, integer::IntegerData};
 use std::fmt;
-use ton_types::{Result, types::ExceptionCode};
 
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
+
+pub(crate) type ResultMut<'a, T> = Result<&'a mut T>;
+pub(crate) type ResultOpt<T> = Result<Option<T>>;
+pub(crate) type ResultRef<'a, T> = Result<&'a T>;
+pub(crate) type ResultVec<T> = Result<Vec<T>>;
+pub(crate) type Status = Result<()>;
+
+#[derive(Clone, Copy, Debug, num_derive::FromPrimitive, PartialEq, Eq, thiserror::Error)]
+pub enum ExceptionCode {
+    #[error("normal termination")]
+    NormalTermination = 0,
+    #[error("alternative termination")]
+    AlternativeTermination = 1,
+    #[error("stack underflow")]
+    StackUnderflow = 2,
+    #[error("stack overflow")]
+    StackOverflow = 3,
+    #[error("integer overflow")]
+    IntegerOverflow = 4,
+    #[error("range check error")]
+    RangeCheckError = 5,
+    #[error("invalid opcode")]
+    InvalidOpcode = 6,
+    #[error("type check error")]
+    TypeCheckError = 7,
+    #[error("cell overflow")]
+    CellOverflow = 8,
+    #[error("cell underflow")]
+    CellUnderflow = 9,
+    #[error("dictionary error")]
+    DictionaryError = 10,
+    #[error("unknown error")]
+    UnknownError = 11,
+    #[error("fatal error")]
+    FatalError = 12,
+    #[error("out of gas")]
+    OutOfGas = 13,
+    #[error("illegal instruction")]
+    IllegalInstruction = 14,
+    #[error("pruned cell")]
+    PrunedCellAccess = 15,
+}
+
+#[macro_export]
+macro_rules! error {
+    ($error:literal) => {
+        anyhow::anyhow!(format!("{} {}:{}", $error, file!(), line!()))
+    };
+    ($error:expr) => {
+        anyhow::Error::from($error)
+    };
+    ($fmt:expr, $($arg:tt)+) => {
+        anyhow::Error::msg(format!("{} {}:{}", format!($fmt, $($arg)*), file!(), line!()))
+    };
+}
+
+#[macro_export]
+macro_rules! fail {
+    ($error:literal) => {
+        anyhow::bail!("{} {}:{}", $error, file!(), line!())
+    };
+    // uncomment to explicit panic for any ExceptionCode
+    // (ExceptionCode::CellUnderflow) => {
+    //     panic!("{}", error!(ExceptionCode::CellUnderflow))
+    // };
+    ($error:expr) => {
+        anyhow::bail!($error)
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        anyhow::bail!("{} {}:{}", format!($fmt, $($arg)*), file!(), line!())
+    };
+}
 #[derive(Clone, PartialEq)]
 enum ExceptionType {
     System(ExceptionCode),
@@ -197,7 +269,7 @@ macro_rules! err {
         Err(exception!($code, $file, $line))
     };
 }
-
+/*
 macro_rules! custom_err {
     ($code:expr, $msg:literal, $($arg:tt)*) => {
         return Err(
@@ -210,7 +282,7 @@ macro_rules! custom_err {
         )
     };
 }
-
+*/
 impl fmt::Display for Exception {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -225,9 +297,3 @@ impl fmt::Debug for Exception {
         Exception::fmt(self, f)
     }
 }
-
-pub(crate) type ResultMut<'a, T> = Result<&'a mut T>;
-pub(crate) type ResultOpt<T> = Result<Option<T>>;
-pub(crate) type ResultRef<'a, T> = Result<&'a T>;
-pub(crate) type ResultVec<T> = Result<Vec<T>>;
-pub(crate) type Status = Result<()>;

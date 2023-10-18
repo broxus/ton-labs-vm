@@ -29,10 +29,11 @@ use crate::{
             }
         }
     },
-    types::{Exception, Status}
+    types::{Exception, Status, Result, ExceptionCode}
 };
-use smallvec::smallvec;
-use ton_types::{BuilderData, CellType, GasConsumer, error, IBitstring, Result, ExceptionCode, MAX_LEVEL};
+use everscale_types::cell::{CellBuilder, LevelMask};
+use everscale_types::models::GlobalCapability;
+use everscale_types::prelude::CellType;
 
 const QUIET: u8 = 0x01; // quiet variant
 const STACK: u8 = 0x02; // length of int in stack
@@ -52,18 +53,18 @@ fn size_b(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     match engine.cmd.var(0).as_builder()? {
         b if how.bit(INV) => {
             if how.bit(BITS) {
-                engine.cc.stack.push(int!(b.bits_free()));
+                engine.cc.stack.push(int!(b.spare_bits_capacity()));
             }
             if how.bit(REFS) {
-                engine.cc.stack.push(int!(b.references_free()));
+                engine.cc.stack.push(int!(b.spare_refs_capacity()));
             }
         }
         b => {
             if how.bit(BITS) {
-                engine.cc.stack.push(int!(b.bits_used()));
+                engine.cc.stack.push(int!(b.bit_len()));
             }
             if how.bit(REFS) {
-                engine.cc.stack.push(int!(b.references_used()));
+                engine.cc.stack.push(int!(b.references().len()));
             }
         }
     }
@@ -120,16 +121,17 @@ pub fn execute_endxc(engine: &mut Engine) -> Status {
     let special = engine.cmd.var(0).as_bool()?;
     let mut b = engine.cmd.var_mut(1).as_builder_mut()?;
     if special {
-        if b.length_in_bits() < 8 {
-            engine.use_gas(Gas::finalize_price());
+        if b.bit_len() < 8 {
+            engine.gas_consumer.gas_mut().use_gas(Gas::finalize_price());
             return err!(ExceptionCode::CellOverflow, "Not enough data for a special cell")
         }
-        match CellType::try_from(b.data()[0]) {
-            Ok(cell_type) => b.set_type(cell_type),
-            Err(err) => return err!(ExceptionCode::CellOverflow, "{}", err)
+        let cell_type = b.raw_data()[0];
+        match CellType::from_byte(cell_type) {
+            Some(cell_type) => b.set_exotic(cell_type != CellType::Ordinary),
+            None => return err!(ExceptionCode::CellOverflow, "unknown cell type {}", cell_type)
         }
     }
-    let cell = engine.finalize_cell(b)?;
+    let cell = engine.gas_consumer.ctx(|c| b.build_ext(c))?;
     engine.cc.stack.push(StackItem::Cell(cell));
     Ok(())
 }
@@ -139,20 +141,20 @@ pub fn execute_newc(engine: &mut Engine) -> Status {
     engine.load_instruction(
         Instruction::new("NEWC")
     )?;
-    engine.cc.stack.push_builder(BuilderData::new());
+    engine.cc.stack.push_builder(CellBuilder::new());
     Ok(())
 }
 
 // store data from one builder to another
-fn store_data(engine: &mut Engine, var: usize, x: Result<BuilderData>, quiet: bool, finalize: bool) -> Status {
+fn store_data(engine: &mut Engine, var: usize, x: Result<CellBuilder>, quiet: bool, finalize: bool) -> Status {
     let result = match x {
         Ok(x) => {
             let b = engine.cmd.var(var).as_builder()?;
-            if b.can_append(&x) {
+            if b.has_capacity(x.bit_len(), x.references().len() as u8) {
                 let mut b = engine.cmd.var_mut(var).as_builder_mut()?;
-                b.append_builder(&x)?;
+                b.store_builder(&x)?;
                 if finalize {
-                    engine.try_use_gas(Gas::finalize_price())?;
+                    engine.gas_consumer.gas_mut().try_use_gas(Gas::finalize_price())?;
                 }
                 engine.cc.stack.push_builder(b);
                 0
@@ -232,8 +234,10 @@ fn store_r(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         x = engine.cmd.var(1).as_cell()?;
         0
     };
-    let x = BuilderData::with_raw_and_refs(smallvec![], 0, vec![x.clone()]);
-    store_data(engine, b, x, how.bit(QUIET), false)
+    let mut builder = CellBuilder::new();
+    let builder = builder.store_reference(x.clone())
+        .map(|_| builder).map_err(|e| error!(e));
+    store_data(engine, b, builder, how.bit(QUIET), false)
 }
 
 // (cell builder - builder)
@@ -272,8 +276,10 @@ fn store_br(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         x = engine.cmd.var_mut(1).as_builder_mut()?;
         0
     };
-    let x = BuilderData::with_raw_and_refs(smallvec![], 0, vec![x.into_cell()?]);
-    store_data(engine, b, x, how.bit(QUIET), true)
+    let mut builder = CellBuilder::new();
+    let builder = builder.store_reference(x.build()?)
+        .map(|_| builder).map_err(|e| error!(e));
+    store_data(engine, b, builder, how.bit(QUIET), true)
 }
 
 /// STBREF (b` b - b``), equivalent to SWAP; STBREFREV
@@ -311,8 +317,10 @@ fn store_s(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         x = engine.cmd.var(1).as_slice()?;
         0
     };
-    let x = Ok(BuilderData::from_slice(x));
-    store_data(engine, b, x, how.bit(QUIET), false)
+    let mut builder = CellBuilder::new();
+    let builder = builder.store_slice(x.as_ref())
+        .map(|_| builder).map_err(|e| error!(e));
+    store_data(engine, b, builder, how.bit(QUIET), false)
 }
 
 // (D b - b')
@@ -322,11 +330,15 @@ pub(crate) fn execute_stdict(engine: &mut Engine) -> Status {
     )?;
     fetch_stack(engine, 2)?;
     engine.cmd.var(0).as_builder()?;
+    let mut builder = CellBuilder::new();
     let x = match engine.cmd.var(1).as_dict()? {
-        Some(x) => BuilderData::with_raw_and_refs(smallvec![0xC0], 1, vec![x.clone()]),
-        None => BuilderData::with_raw(smallvec![0x40], 1)
+        Some(x) =>
+            builder.store_raw(&[0xC0], 1)
+                .and_then(|_| builder.store_reference(x.clone())),
+        None => builder.store_raw(&[0x40], 1)
     };
-    store_data(engine, 0, x, false, false)
+    let builder = x.map(|_| builder).map_err(|e| error!(e));
+    store_data(engine, 0, builder, false, false)
 }
 
 // (s b - b)
@@ -376,10 +388,10 @@ fn check_b(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     let b = engine.cmd.var(params - 1).as_builder()?;
     let mut status = true;
     if how.bit(BITS) {
-        status &= b.check_enough_space(l)
+        status &= b.spare_bits_capacity() as usize >= l
     }
     if how.bit(REFS) {
-        status &= b.check_enough_refs(r)
+        status &= b.spare_refs_capacity() >= r
     }
     if how.bit(QUIET) {
         engine.cc.stack.push(boolean!(status));
@@ -572,9 +584,9 @@ pub fn execute_stule8(engine: &mut Engine) -> Status {
     store_l::<UnsignedIntegerLittleEndianEncoding>(engine, "STULE8", 64)
 }
 
-fn store_bits(mut builder: BuilderData, n: usize, bit: bool) -> Result<BuilderData> {
+fn store_bits(mut builder: CellBuilder, n: u16, bit: bool) -> Result<CellBuilder> {
     if n != 0 {
-        builder.append_raw(vec![if bit {0xFF} else {0}; n / 8 + 1].as_slice(), n)?;
+        builder.store_raw(vec![if bit {0xFF} else {0}; n as usize / 8 + 1].as_slice(), n)?;
     }
     Ok(builder)
 }
@@ -624,7 +636,7 @@ pub fn execute_stsliceconst(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let mut builder = engine.cmd.var_mut(0).as_builder_mut()?;
     let slice = engine.cmd.slice();
-    builder.checked_append_references_and_data(slice)?;
+    builder.store_slice(slice.as_ref())?;
     engine.cc.stack.push_builder(builder);
     Ok(())
 }
@@ -639,7 +651,7 @@ pub fn execute_strefconst(engine: &mut Engine) -> Status {
         engine.cmd.var(0).as_cell()?;
         engine.cmd.var_mut(1).as_builder_mut()?
     };
-    b.checked_append_reference(engine.cmd.var(0).as_cell()?.clone())?;
+    b.store_reference(engine.cmd.var(0).as_cell()?.clone())?;
     engine.cc.stack.push_builder(b);
     Ok(())
 }
@@ -656,8 +668,8 @@ pub fn execute_stref2const(engine: &mut Engine) -> Status {
         engine.cmd.var(1).as_cell()?;
         engine.cmd.var_mut(2).as_builder_mut()?
     };
-    b.checked_append_reference(engine.cmd.var(0).as_cell()?.clone())?;
-    b.checked_append_reference(engine.cmd.var(1).as_cell()?.clone())?;
+    b.store_reference(engine.cmd.var(0).as_cell()?.clone())?;
+    b.store_reference(engine.cmd.var(1).as_cell()?.clone())?;
     engine.cc.stack.push_builder(b);
     Ok(())
 }
@@ -669,7 +681,7 @@ pub fn execute_bdepth(engine: &mut Engine) -> Status {
     let mut depth = 0;
     let b = engine.cmd.var(0).as_builder()?;
     for cell in b.references() {
-        depth = std::cmp::max(depth, 1 + cell.depth(MAX_LEVEL));
+        depth = std::cmp::max(depth, 1 + cell.depth(LevelMask::MAX_LEVEL));
     }
     engine.cc.stack.push(int!(depth));
     Ok(())
@@ -683,10 +695,10 @@ pub fn execute_cdepth(engine: &mut Engine) -> Status {
         0
     } else {
         let c = engine.cmd.var(0).as_cell()?;
-        if !engine.check_capabilities(ton_block::GlobalCapabilities::CapResolveMerkleCell as u64) && c.references_count() == 0 {
+        if !engine.has_capability(GlobalCapability::CapResolveMerkleCell) && c.references().len() == 0 {
             0
         } else {
-            c.depth(MAX_LEVEL)
+            c.depth(LevelMask::MAX_LEVEL)
         }
     };
     engine.cc.stack.push(int!(depth));
@@ -699,9 +711,9 @@ pub fn execute_sdepth(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let mut depth = 0;
     let s = engine.cmd.var(0).as_slice()?;
-    let n = s.remaining_references();
+    let n = s.as_ref().remaining_refs();
     for i in 0..n {
-        depth = std::cmp::max(depth, 1 + s.reference(i)?.depth(MAX_LEVEL));
+        depth = std::cmp::max(depth, 1 + s.as_ref().get_reference(i)?.depth(LevelMask::MAX_LEVEL));
     }
     engine.cc.stack.push(int!(depth));
     Ok(())
@@ -714,11 +726,11 @@ pub fn execute_stcont(engine: &mut Engine) -> Status {
     engine.cmd.var(0).as_builder()?;
     engine.cmd.var(1).as_continuation()?;
     let cont = engine.cmd.var_mut(1).withdraw();
-    let cont = if engine.check_capabilities(ton_block::GlobalCapabilities::CapStcontNewFormat as u64) {
-        cont.as_continuation()?.serialize(engine)?
+    let cont = if engine.has_capability(GlobalCapability::CapStcontNewFormat) {
+        cont.as_continuation()?.serialize(&mut engine.gas_consumer)?
     } else {
         let (cont, gas) = cont.as_continuation()?.serialize_old()?;
-        engine.use_gas(gas);
+        engine.gas_consumer.gas_mut().use_gas(gas);
         cont
     };
     store_data(engine, 0, Ok(cont), false, false)

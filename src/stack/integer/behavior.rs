@@ -11,8 +11,7 @@
 * limitations under the License.
 */
 
-use crate::{error::TvmError, types::{Exception, Status}};
-use ton_types::{error, types::ExceptionCode};
+use crate::{error::TvmError, types::{ExceptionCode, Exception, Status}};
 
 pub trait OperationBehavior {
     fn quiet() -> bool;

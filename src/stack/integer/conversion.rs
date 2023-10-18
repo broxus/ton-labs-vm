@@ -17,11 +17,10 @@ use crate::{
         utils::{check_overflow, twos_complement},
         Int, IntegerData, IntegerValue,
     },
-    types::Exception,
+    types::{Exception, ExceptionCode, Result},
 };
 use num_traits::Num;
 use std::ops::RangeInclusive;
-use ton_types::{error, types::ExceptionCode, Result};
 
 impl IntegerData {
     /// Constructs new IntegerData from u32 in a fastest way.

@@ -10,9 +10,7 @@
 * See the License for the specific TON DEV software governing permissions and
 * limitations under the License.
 */
-
-use ton_types::{error, fail, Result, ExceptionCode};
-use crate::types::Exception;
+use crate::types::{Result, Exception, ExceptionCode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TvmError {
@@ -34,7 +32,7 @@ pub fn tvm_exception(err: anyhow::Error) -> Result<Exception> {
     match err.downcast::<TvmError>() {
         Ok(TvmError::TvmExceptionFull(err, _)) => Ok(err),
         Ok(err) => fail!(err),
-        Err(err) => if let Some(err) = err.downcast_ref::<ton_types::types::ExceptionCode>() {
+        Err(err) => if let Some(err) = err.downcast_ref::<ExceptionCode>() {
             Ok(Exception::from(*err))
         } else {
             Err(err)
@@ -46,7 +44,7 @@ pub fn tvm_exception_code(err: &anyhow::Error) -> Option<ExceptionCode> {
     match err.downcast_ref::<TvmError>() {
         Some(TvmError::TvmExceptionFull(err, _)) => err.exception_code(),
         Some(_) => None,
-        None => err.downcast_ref::<ton_types::types::ExceptionCode>().cloned()
+        None => err.downcast_ref::<ExceptionCode>().cloned()
     }
 }
 
@@ -54,7 +52,7 @@ pub fn tvm_exception_or_custom_code(err: &anyhow::Error) -> i32 {
     match err.downcast_ref::<TvmError>() {
         Some(TvmError::TvmExceptionFull(err, _)) => err.exception_or_custom_code(),
         Some(_) => ExceptionCode::UnknownError as i32,
-        None => if let Some(err) = err.downcast_ref::<ton_types::types::ExceptionCode>() {
+        None => if let Some(err) = err.downcast_ref::<ExceptionCode>() {
             *err as i32
         } else {
             ExceptionCode::UnknownError as i32
@@ -67,7 +65,7 @@ pub fn tvm_exception_full(err: &anyhow::Error) -> Option<Exception> {
         Some(TvmError::TvmExceptionFull(err, _)) => Some(err.clone()),
         Some(_) => None,
         None => {
-            err.downcast_ref::<ton_types::types::ExceptionCode>().map(|err|
+            err.downcast_ref::<ExceptionCode>().map(|err|
                 Exception::from_code(*err, file!(), line!())
             )
         }
@@ -81,7 +79,7 @@ pub fn update_error_description(mut err: anyhow::Error, f: impl FnOnce(&str) -> 
         }
         Some(_) => (),
         None => {
-            if let Some(code) = err.downcast_ref::<ton_types::ExceptionCode>() {
+            if let Some(code) = err.downcast_ref::<ExceptionCode>() {
                 // TODO: it is wrong, need to modify current backtrace
                 err = TvmError::TvmExceptionFull(Exception::from_code(*code, file!(), line!()), f(&format!("{:?}", err))).into()
             }

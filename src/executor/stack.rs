@@ -25,11 +25,10 @@ use crate::{
         StackItem, continuation::ContinuationData,
         integer::{IntegerData, behavior::Signaling}, savelist::SaveList
     },
-    types::{Exception, Status}
+    types::{ExceptionCode, Exception, Status}
 };
 use std::cmp;
-use ton_types::{error, fail, types::ExceptionCode};
-use ton_block::GlobalCapabilities;
+use everscale_types::models::GlobalCapability;
 
 // Stack manipulation *********************************************************
 
@@ -266,7 +265,7 @@ pub(super) fn execute_popsave(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let creg = engine.cmd.creg();
     swap(engine, var!(0), ctrl!(creg))?;
-    if engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+    if engine.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
         if let Ok(c0) = engine.ctrl(0) {
             if let Ok(c0) = c0.as_continuation() {
                 if c0.savelist.get(creg).is_some() {

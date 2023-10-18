@@ -11,69 +11,70 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::{CellBuilder, CellSlice, HashBytes, LoadMode};
+use everscale_types::error::Error;
+use everscale_types::models::{
+    ChangeLibraryMode, CurrencyCollection, ExtraCurrencyCollection, GlobalCapability, IntAddr,
+    Lazy, LibRef, OutAction, ReserveCurrencyFlags, SendMsgFlags
+};
+use everscale_types::num::Tokens;
+use everscale_types::prelude::{Cell, CellFamily, Load, Store};
+use num::{BigInt, bigint::Sign};
+
+use crate::{OwnedCellSlice, types::{Result, ExceptionCode}};
+
 use crate::{
     error::TvmError,
     executor::{
-        engine::{storage::fetch_stack, Engine},
-        serialize_currency_collection,
+        engine::{Engine, storage::fetch_stack}, GasConsumer,
         types::Instruction,
     },
     stack::{
         integer::{
-            behavior::OperationBehavior, serialization::UnsignedIntegerBigEndianEncoding,
-            IntegerData,
+            behavior::OperationBehavior, IntegerData,
+            serialization::UnsignedIntegerBigEndianEncoding,
         },
         StackItem,
     },
     types::{Exception, Status},
 };
-use num::{bigint::Sign, BigInt};
-use ton_block::{
-    Deserializable, GlobalCapabilities, MsgAddressInt, ACTION_CHANGE_LIB, ACTION_COPYLEFT,
-    ACTION_RESERVE, ACTION_SEND_MSG, ACTION_SET_CODE,
-};
-use smallvec::smallvec;
-use ton_types::{
-    error, types::ExceptionCode, BuilderData, Cell, GasConsumer, IBitstring, Result, SliceData,
-};
 
-fn get_bigint(slice: &SliceData) -> BigInt {
+fn get_bigint(slice: &CellSlice) -> Result<BigInt> {
     let bits = slice.remaining_bits();
     if bits == 0 {
-        BigInt::from(0)
+        Ok(BigInt::from(0))
     } else if bits < 256 {
-        BigInt::from_bytes_be(Sign::Plus, &slice.get_bytestring(0)) << (256 - bits)
+        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0, 32], bits)?) << (256 - bits))
     } else {
-        BigInt::from_bytes_be(Sign::Plus, &slice.get_bytestring(0)[..32])
+        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0, 32], 256)?))
     }
 }
 
 
 // Blockchain related instructions ********************************************
 
-fn add_action(engine: &mut Engine, action_id: u32, cell: Option<Cell>, suffix: BuilderData) -> Status {
-    let mut new_action = BuilderData::new();
+fn add_action(engine: &mut Engine, action: &OutAction) -> Status {
+    let mut new_action = CellBuilder::new();
     let c5 = engine.ctrls.get(5).ok_or(ExceptionCode::TypeCheckError)?;
-    new_action.checked_append_reference(c5.as_cell()?.clone())?;
-    new_action.append_u32(action_id)?.append_builder(&suffix)?;
-    if let Some(cell) = cell {
-        new_action.checked_append_reference(cell)?;
-    }
-    let cell = engine.finalize_cell(new_action)?;
+    new_action.store_reference(c5.as_cell()?.clone())?;
+    action.store_into(&mut new_action, &mut Cell::empty_context())?;
+    let cell = engine.gas_consumer.ctx(|c| new_action.build_ext(c))?;
     engine.ctrls.put(5, &mut StackItem::Cell(cell))?;
     Ok(())
 }
 
 /// CHANGELIB (h x - )
 pub(super) fn execute_changelib(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapSetLibCode)?;
+    engine.check_capability(GlobalCapability::CapSetLibCode)?;
     engine.load_instruction(Instruction::new("CHANGELIB"))?;
     fetch_stack(engine, 2)?;
     let x = engine.cmd.var(0).as_integer()?.into(0..=2)? as u8;
     let hash = engine.cmd.var(1).as_integer()?.as_builder::<UnsignedIntegerBigEndianEncoding>(256)?;
-    let mut suffix = BuilderData::with_raw(smallvec![x * 2], 8)?;
-    suffix.append_builder(&hash)?;
-    add_action(engine, ACTION_CHANGE_LIB, None, suffix)
+    let action = OutAction::ChangeLibrary {
+        mode: ChangeLibraryMode::try_from(x)?,
+        lib: LibRef::Hash(HashBytes::from_slice(hash.raw_data()))
+    };
+    add_action(engine, &action)
 }
 
 /// SENDRAWMSG (c x – ): pop mode and message cell from stack and put it at the
@@ -83,8 +84,11 @@ pub(super) fn execute_sendrawmsg(engine: &mut Engine) -> Status {
     fetch_stack(engine, 2)?;
     let x = engine.cmd.var(0).as_integer()?.into(0..=255)?;
     let cell = engine.cmd.var(1).as_cell()?.clone();
-    let suffix = BuilderData::with_raw(smallvec![x], 8)?;
-    add_action(engine, ACTION_SEND_MSG, Some(cell), suffix)
+    let action = OutAction::SendMsg {
+        mode: SendMsgFlags::from_bits(x).ok_or(error!(Error::InvalidData))?,
+        out_msg: Lazy::from_raw(cell),
+    };
+    add_action(engine, &action)
 }
 
 /// SETCODE (c - )
@@ -92,39 +96,46 @@ pub(super) fn execute_setcode(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("SETCODE"))?;
     fetch_stack(engine, 1)?;
     let cell = engine.cmd.var(0).as_cell()?.clone();
-    add_action(engine, ACTION_SET_CODE, Some(cell), BuilderData::new())
+    let action = OutAction::SetCode { new_code: cell };
+    add_action(engine, &action)
 }
 
 /// SETLIBCODE (c x - )
 pub(super) fn execute_setlibcode(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapSetLibCode)?;
+    engine.check_capability(GlobalCapability::CapSetLibCode)?;
     engine.load_instruction(Instruction::new("SETLIBCODE"))?;
     fetch_stack(engine, 2)?;
-    let x = engine.cmd.var(0).as_integer()?.into(0..=2)? as u8;
+    let x = engine.cmd.var(0).as_integer()?.into(0..=2)?;
     let cell = engine.cmd.var(1).as_cell()?.clone();
-    add_action(engine, ACTION_CHANGE_LIB, Some(cell), BuilderData::with_raw(smallvec![x * 2 + 1], 8)?)
+    let action = OutAction::ChangeLibrary {
+        mode: ChangeLibraryMode::try_from(x)?,
+        lib: LibRef::Cell(cell)
+    };
+    add_action(engine, &action)
 }
 
 /// COPYLEFT (s n - )
 pub(super) fn execute_copyleft(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapCopyleft)?;
+    engine.check_capability(GlobalCapability::CapCopyleft)?;
     if engine.check_or_set_flags(Engine::FLAG_COPYLEFTED) {
-        return Status::Err(ExceptionCode::IllegalInstruction.into());
+        return Err(ExceptionCode::IllegalInstruction.into());
     }
     engine.load_instruction(Instruction::new("COPYLEFT"))?;
 
     let mut myaddr_slice = engine.smci_param(8)?.as_slice()?.clone();
-    let myaddr = MsgAddressInt::construct_from(&mut myaddr_slice)?;
+    let myaddr = IntAddr::load_from(myaddr_slice.as_mut())?;
     fetch_stack(engine, 2)?;
     if !myaddr.is_masterchain() {
-        let num = [engine.cmd.var(0).as_integer()?.into(0..=255)? as u8];
+        let num = engine.cmd.var(0).as_integer()?.into(0..=255)?;
         let slice = engine.cmd.var(1).as_slice()?;
-        if slice.remaining_bits() != 32 * 8 {
-            return Status::Err(ExceptionCode::TypeCheckError.into());
+        if slice.as_ref().remaining_bits() != 256 {
+            return Err(ExceptionCode::TypeCheckError.into());
         }
-        let mut suffix = BuilderData::new();
-        suffix.append_raw(&num, 8)?.append_bytestring(slice)?;
-        add_action(engine, ACTION_COPYLEFT, None, suffix)
+        let action = OutAction::CopyLeft {
+            license: num,
+            address: slice.as_ref().get_u256(0)?,
+        };
+        add_action(engine, &action)
     } else {
         Ok(())
     }
@@ -135,10 +146,12 @@ pub(super) fn execute_rawreserve(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("RAWRESERVE"))?;
     fetch_stack(engine, 2)?;
     let y = engine.cmd.var(0).as_integer()?.into(0..=15)?;
-    let mut suffix = BuilderData::with_raw(smallvec![y], 8)?;
     let x = engine.cmd.var(1).as_grams()?;
-    suffix.append_builder(&serialize_currency_collection(x, None)?)?;
-    add_action(engine, ACTION_RESERVE, None, suffix)
+    let action = OutAction::ReserveCurrency {
+        mode: ReserveCurrencyFlags::from_bits(y).ok_or(error!(Error::InvalidData))?,
+        value: CurrencyCollection::new(x),
+    };
+    add_action(engine, &action)
 }
 
 /// RAWRESERVEX (s y - )
@@ -146,11 +159,13 @@ pub(super) fn execute_rawreservex(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("RAWRESERVEX"))?;
     fetch_stack(engine, 3)?;
     let y = engine.cmd.var(0).as_integer()?.into(0..=15)?;
-    let mut suffix = BuilderData::with_raw(smallvec![y], 8)?;
-    let other = engine.cmd.var(1).as_dict()?;
+    let other = engine.cmd.var(1).as_dict()?.cloned();
     let x = engine.cmd.var(2).as_grams()?;
-    suffix.append_builder(&serialize_currency_collection(x, other.cloned())?)?;
-    add_action(engine, ACTION_RESERVE, None, suffix)
+    let action = OutAction::ReserveCurrency {
+        mode: ReserveCurrencyFlags::from_bits(y).ok_or(error!(Error::InvalidData))?,
+        value: CurrencyCollection{ tokens: Tokens::new(x), other: ExtraCurrencyCollection::from_raw(other) },
+    };
+    add_action(engine, &action)
 }
 
 pub(super) fn execute_ldmsgaddr<T: OperationBehavior>(engine: &mut Engine) -> Status {
@@ -161,7 +176,14 @@ pub(super) fn execute_ldmsgaddr<T: OperationBehavior>(engine: &mut Engine) -> St
     let mut slice = engine.cmd.var(0).as_slice()?.clone();
     let mut remainder = slice.clone();
     if parse_address(&mut remainder).is_ok() {
-        slice.shrink_by_remainder(&remainder);
+        let (bits_to_move, refs_to_move) = {
+            let remainder = remainder.as_ref();
+            let slice = slice.as_ref();
+            let bits_to_move = remainder.bits_offset() - slice.bits_offset();
+            let refs_to_move = remainder.refs_offset() - slice.refs_offset();
+            (bits_to_move, refs_to_move)
+        };
+        slice.as_mut().shrink(Some(bits_to_move), Some(refs_to_move))?;
         engine.cc.stack.push(StackItem::Slice(slice));
         engine.cc.stack.push(StackItem::Slice(remainder));
         if T::quiet() {
@@ -179,13 +201,13 @@ pub(super) fn execute_ldmsgaddr<T: OperationBehavior>(engine: &mut Engine) -> St
 }
 
 fn load_address<F, T>(engine: &mut Engine, name: &'static str, op: F) -> Status
-where F: FnOnce(Vec<StackItem>, &mut dyn GasConsumer) -> Result<Vec<StackItem>>, T: OperationBehavior {
+where F: FnOnce(Vec<StackItem>, &mut GasConsumer) -> Result<Vec<StackItem>>, T: OperationBehavior {
     engine.load_instruction(Instruction::new(name))?;
     fetch_stack(engine, 1)?;
     let mut slice = engine.cmd.var(0).as_slice()?.clone();
     let mut result = false;
     if let Ok(addr) = parse_address(&mut slice) {
-        if let Ok(mut stack) = op(addr, engine) {
+        if let Ok(mut stack) = op(addr, &mut engine.gas_consumer) {
             stack.drain(..).for_each(|var| {engine.cc.stack.push(var);});
             result = true;
         }
@@ -211,18 +233,18 @@ pub(super) fn execute_rewrite_std_addr<T: OperationBehavior>(engine: &mut Engine
     load_address::<_, T>(engine, if T::quiet() {"REWRITESTDADDRQ"} else {"REWRITESTDADDR"}, |tuple, _| {
         if tuple.len() == 4 {
             let addr = tuple[3].as_slice()?;
-            let mut y = match addr.remaining_bits() {
-                256 => IntegerData::from(get_bigint(addr))?,
+            let mut y = match addr.as_ref().remaining_bits() {
+                256 => IntegerData::from(get_bigint(addr.as_ref())?)?,
                 _ => return err!(ExceptionCode::CellUnderflow)
             };
             if tuple[1].is_slice() {
                 let rewrite_pfx = tuple[1].as_slice()?;
-                let bits = rewrite_pfx.remaining_bits();
+                let bits = rewrite_pfx.as_ref().remaining_bits();
                 if bits > 256 {
                     return err!(ExceptionCode::CellUnderflow)
                 } else if bits > 0 {
-                    let prefix = IntegerData::from(get_bigint(rewrite_pfx))?;
-                    let mask = IntegerData::mask(256 - bits);
+                    let prefix = IntegerData::from(get_bigint(rewrite_pfx.as_ref())?)?;
+                    let mask = IntegerData::mask((256 - bits) as usize);
                     y = y.and::<T>(&mask)?.or::<T>(&prefix)?;
                 }
             };
@@ -240,14 +262,18 @@ pub(super) fn execute_rewrite_var_addr<T: OperationBehavior>(engine: &mut Engine
         if tuple.len() == 4 {
             let mut addr = tuple[3].as_slice()?.clone();
             if let Ok(rewrite_pfx) = tuple[1].as_slice() {
-                let bits = rewrite_pfx.remaining_bits();
-                if bits > addr.remaining_bits() {
+                let pfx_bits = rewrite_pfx.as_ref().remaining_bits();
+                if pfx_bits > addr.as_ref().remaining_bits() {
                     return err!(ExceptionCode::CellUnderflow)
-                } else if bits > 0 {
-                    let mut b = BuilderData::from_slice(rewrite_pfx);
-                    addr.shrink_data(bits..);
-                    b.append_bytestring(&addr)?;
-                    addr = gas_consumer.finalize_cell_and_load(b)?;
+                } else if pfx_bits > 0 {
+                    let mut b = CellBuilder::new();
+                    b.store_slice_data(rewrite_pfx.as_ref())?;
+                    addr.as_mut().advance(pfx_bits, 0)?;
+                    b.store_slice_data(addr.as_ref())?;
+                    let cell = gas_consumer.ctx(|c| b.build_ext(c))?;
+                    addr = OwnedCellSlice::new(
+                        gas_consumer.ctx(|c| c.load_cell(cell, LoadMode::Full))?
+                    )?;
                 }
             };
             let x = tuple[2].clone();
@@ -258,41 +284,48 @@ pub(super) fn execute_rewrite_var_addr<T: OperationBehavior>(engine: &mut Engine
     })
 }
 
-fn read_rewrite_pfx(cell: &mut SliceData) -> Result<Option<SliceData>> {
-    match cell.get_next_bit()? {
+fn read_rewrite_pfx(slice: &mut OwnedCellSlice) -> Result<Option<OwnedCellSlice>> {
+    match slice.as_mut().load_bit()? {
         true => {
-            let len = cell.get_next_int(5)?;
-            Ok(Some(cell.get_next_slice(len as usize)?))
+            let len = slice.as_mut().load_small_uint(5)? as u16;
+            Ok(Some(get_next_slice(slice, len)?))
         }
         false => Ok(None)
     }
 }
 
-fn parse_address(cell: &mut SliceData) -> Result<Vec<StackItem>> {
-    let addr_type = cell.get_next_int(2)? as u8;
+fn get_next_slice(slice: &mut OwnedCellSlice, bit_len: u16) -> Result<OwnedCellSlice> {
+    let mut result = slice.clone();
+    result.as_mut().shrink(Some(bit_len), Some(0))?;
+    slice.as_mut().advance(bit_len, 0)?;
+    Ok(result)
+}
+
+fn parse_address(slice: &mut OwnedCellSlice) -> Result<Vec<StackItem>> {
+    let addr_type = slice.as_mut().load_small_uint(2)?;
     let mut tuple = vec!(int!(addr_type));
     match addr_type & 0b11 {
         0b00 => (),
         0b01 => {
-            let len = cell.get_next_int(9)?;
-            tuple.push(StackItem::Slice(cell.get_next_slice(len as usize)?));
+            let len = slice.as_mut().load_uint(9)? as u16;
+            tuple.push(StackItem::Slice(get_next_slice(slice, len)?));
         }
         0b10 => {
-            tuple.push(match read_rewrite_pfx(cell)? {
+            tuple.push(match read_rewrite_pfx(slice)? {
                 Some(slice) => StackItem::Slice(slice),
                 None => StackItem::None
             });
-            tuple.push(int!(cell.get_next_byte()? as i8));
-            tuple.push(StackItem::Slice(cell.get_next_slice(256)?));
+            tuple.push(int!(slice.as_mut().load_u8()? as i8));
+            tuple.push(StackItem::Slice(get_next_slice(slice, 256)?));
         }
         0b11 => {
-            tuple.push(match read_rewrite_pfx(cell)? {
+            tuple.push(match read_rewrite_pfx(slice)? {
                 Some(slice) => StackItem::Slice(slice),
                 None => StackItem::None
             });
-            let len = cell.get_next_int(9)?;
-            tuple.push(int!(cell.get_next_i32()?));
-            tuple.push(StackItem::Slice(cell.get_next_slice(len as usize)?));
+            let len = slice.as_mut().load_uint(9)? as u16;
+            tuple.push(int!(slice.as_mut().load_u32()? as i32));
+            tuple.push(StackItem::Slice(get_next_slice(slice, len)?));
         }
         _ => ()
     }

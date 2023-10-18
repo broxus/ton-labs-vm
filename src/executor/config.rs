@@ -11,16 +11,16 @@
 * limitations under the License.
 */
 
+use everscale_types::models::GlobalCapability;
 use crate::{
     executor::{engine::{Engine, storage::fetch_stack}, types::{InstructionOptions, Instruction}},
     stack::{StackItem, integer::IntegerData}, types::Status
 };
-use ton_block::GlobalCapabilities;
 
 fn execute_config_param(engine: &mut Engine, name: &'static str, opt: bool) -> Status {
     engine.load_instruction(Instruction::new(name))?;
     fetch_stack(engine, 1)?;
-    let index: i32 = engine.cmd.var(0).as_integer()?.into(std::i32::MIN..=std::i32::MAX)?;
+    let index: i32 = engine.cmd.var(0).as_integer()?.into(i32::MIN..=i32::MAX)?;
     if let Some(value) = engine.get_config_param(index)? {
         engine.cc.stack.push(StackItem::Cell(value));
         if !opt {
@@ -101,7 +101,7 @@ pub(super) fn execute_my_addr(engine: &mut Engine) -> Status {
 
 // - cell
 pub(super) fn execute_my_code(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapMycode)?;
+    engine.check_capability(GlobalCapability::CapMyCode)?;
     extract_config(engine, "MYCODE")
 }
 
@@ -112,18 +112,18 @@ pub(super) fn execute_randseed(engine: &mut Engine) -> Status {
 
 // - integer | none
 pub(super) fn execute_init_code_hash(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapInitCodeHash)?;
+    engine.check_capability(GlobalCapability::CapInitCodeHash)?;
     extract_config(engine, "INITCODEHASH")
 }
 
 // - integer
 pub(super) fn execute_seq_no(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapDelections)?;
+    engine.check_capability(GlobalCapability::CapDelections)?;
     extract_config(engine, "SEQNO")
 }
 
 // - integer
 pub(super) fn execute_storage_fees_collected(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapStorageFeeToTvm)?;
+    engine.check_capability(GlobalCapability::CapStorageFeeToTvm)?;
     extract_config(engine, "STORAGEFEE")
 }

@@ -37,8 +37,6 @@ mod config;
 mod rand;
 
 pub use engine::*;
-use smallvec::smallvec;
-use ton_types::{BuilderData, Cell, IBitstring, Result};
 
 
 pub trait Mask {
@@ -60,22 +58,4 @@ impl Mask for u8 {
     fn non(&self, bits: Self) -> bool {
         (self & bits) == 0
     }
-}
-
-fn serialize_grams(grams: u128) -> Result<BuilderData> {
-    let bytes = 16 - grams.leading_zeros() as usize / 8;
-    let mut builder = BuilderData::with_raw(smallvec!((bytes as u8) << 4), 4)?;
-    builder.append_raw(&grams.to_be_bytes()[16 - bytes..], bytes * 8)?;
-    Ok(builder)
-}
-
-pub fn serialize_currency_collection(grams: u128, other: Option<Cell>) -> Result<BuilderData> {
-    let mut builder = serialize_grams(grams)?;
-    if let Some(cell) = other {
-        builder.append_bit_one()?;
-        builder.checked_append_reference(cell)?;
-    } else {
-        builder.append_bit_zero()?;
-    }
-    Ok(builder)
 }

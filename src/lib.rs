@@ -18,7 +18,12 @@ pub mod stack;
 #[macro_use]
 pub mod executor;
 
-pub mod smart_contract_info;
-pub use self::smart_contract_info::SmartContractInfo;
+mod fmt;
+mod owned_cell_slice;
 pub mod error;
-pub mod utils;
+pub mod smart_contract_info;
+
+pub(crate) mod utils;
+pub use fmt::*;
+pub use owned_cell_slice::*;
+pub use self::smart_contract_info::SmartContractInfo;

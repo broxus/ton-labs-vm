@@ -15,29 +15,27 @@ use crate::{
     error::TvmError,
     executor::engine::Engine,
     stack::StackItem,
-    types::{Exception, Status},
+    types::{Exception, Status, ExceptionCode, Result},
 };
-use num::{BigUint, ToPrimitive};
+// use num::BigUint;
 use std::{
-    cmp::{min, Ordering},
-    collections::HashMap,
+    // cmp::{min, Ordering},
+    // collections::HashMap,
     sync::Arc,
 };
-use ton_block::{
-    Account, ConfigParam1, ConfigParam15, ConfigParam16, ConfigParam17, ConfigParam34,
-    DelectorParams, Deserializable, GlobalCapabilities, Grams, MsgAddress, MsgAddressInt,
-    Serializable, ShardAccount, SigPubKey, ValidatorDescr, ValidatorSet,
-};
-use ton_types::{
-    error, fail, BuilderData, Cell, ExceptionCode, GasConsumer, HashmapE, IBitstring, Result,
-    SliceData, UInt256,
-};
+use everscale_types::cell::{CellBuilder, HashBytes, Store};
+// use everscale_types::cell::CellContext;
+// use everscale_types::dict::RawDict;
+// use everscale_types::error::Error;
+use everscale_types::models::*;
+// use everscale_types::num::Tokens;
+use everscale_types::prelude::{Cell, CellFamily};
 
 use super::{
     engine::{storage::fetch_stack, IndexProvider},
     types::Instruction,
 };
-
+/*  FIXME support or drop Delector - rewritten part
 #[derive(Debug, Default)]
 struct Staker {
     stake: u128,
@@ -45,9 +43,9 @@ struct Staker {
 
 #[derive(Debug, Default, Ord, Eq, PartialOrd, PartialEq)]
 struct ValidatorKey {
-    stake: Grams,
+    stake: Tokens,
     time: u32,
-    pub_key: UInt256,
+    pub_key: HashBytes,
 }
 
 #[derive(Debug, Default, Eq)]
@@ -56,7 +54,7 @@ struct Validator {
     true_stake: u128, // min(min_stake * max_factor, stake)
     max_factor: u32,  // fixed point real 16 bit
     addr: SimpleAddress,
-    adnl_addr: UInt256,
+    adnl_addr: HashBytes,
     mc_seq_no_since: u32,
 }
 
@@ -107,6 +105,7 @@ impl<'a> SortedList<'a> {
     }
 }
 
+/*  FIXME support or drop Delector - outdated part 1
 pub(crate) fn execute_try_elect(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("TRYELECT"))?;
     engine.check_capability(GlobalCapabilities::CapDelections)?;
@@ -154,15 +153,15 @@ pub(crate) fn execute_try_elect(engine: &mut Engine) -> Status {
     engine.cc.stack.push(StackItem::int(result.total_weight));
     Ok(())
 }
-
+*/ FIXME end of outdated part 1
 #[derive(Debug, Default, Eq, PartialEq)]
 struct SimpleAddress {
     workchain_id: i32,
-    address: UInt256,
+    address: HashBytes,
 }
 
 impl SimpleAddress {
-    fn with_params(workchain_id: i32, address: UInt256) -> Self {
+    fn with_params(workchain_id: i32, address: HashBytes) -> Self {
         Self {
             workchain_id,
             address,
@@ -170,21 +169,24 @@ impl SimpleAddress {
     }
 }
 
-impl Serializable for SimpleAddress {
-    fn write_to(&self, cell: &mut BuilderData) -> Result<()> {
-        self.workchain_id.write_to(cell)?;
-        self.address.write_to(cell)?;
+impl Store for SimpleAddress {
+    fn store_into(&self, builder: &mut CellBuilder, finalizer: &mut dyn CellContext) -> std::result::Result<(), Error> {
+        self.workchain_id.store_into(builder, finalizer)?;
+        self.address.store_into(builder, finalizer)?;
         Ok(())
     }
 }
 
 #[derive(Debug)]
 struct ElectionResult {
-    list: Vec<ValidatorDescr>,
+    list: Vec<ValidatorDescription>,
     total_weight: u64,
     total_stake: u128,
-    frozen: HashmapE, // pub_key: addr, weight, true_stake, banned = false
-    credits: HashmapE,
+    // pub_key: addr, weight, true_stake, banned = false
+    // pub_key => (workchain_id + address), weight u64, stake u128, banned bool
+    frozen: RawDict<256>,
+    // (workchain_id + address) => (stake: u128)
+    credits: RawDict<{ 32 + 256 }>,
 }
 
 impl ElectionResult {
@@ -193,12 +195,13 @@ impl ElectionResult {
             list: Vec::new(),
             total_weight: 0,
             total_stake: 0,
-            frozen: HashmapE::with_bit_len(256), // pub_key => (workchain_id + address), weight u64, stake u128, banned bool
-            credits: HashmapE::with_hashmap(32 + 256, credits), // (workchain_id + address) => (stake: u128)
+            frozen: RawDict::new(),
+            credits: RawDict::from(credits),
         }
     }
 }
-
+*/  // FIXME support or drop Delector - end of rewritten part
+/*  FIXME support or drop Delector - outdated part 2
 fn calculate_elections(
     credits: Option<Cell>,
     mut validators: Vec<Validator>,
@@ -501,25 +504,27 @@ fn find_validators(engine: &mut Engine, cfg17: &ConfigParam17) -> Result<Vec<Val
     }
     Ok(list)
 }
-
+*/ // FIXME support or drop Delector - end of outdated part 2
 /// create tuple list with serializable objects
-fn prepare_items_list<T: Serializable>(items: &[T]) -> Result<StackItem> {
+fn prepare_items_list<T: Store>(items: &[T]) -> Result<StackItem> {
     let mut tuple = StackItem::tuple(Vec::new());
     for item in items.iter().rev() {
-        let cell = item.serialize()?;
-        tuple = StackItem::tuple(vec![StackItem::Cell(cell), tuple]);
+        let mut builder = CellBuilder::new();
+        item.store_into(&mut builder, &mut Cell::empty_context())?;
+        tuple = StackItem::tuple(vec![StackItem::Cell(builder.build()?), tuple]);
     }
     Ok(tuple)
 }
 
 fn execute_find_accounts<F>(engine: &mut Engine, name: &'static str, f: F) -> Status
 where
-    F: FnOnce(Arc<dyn IndexProvider>, &UInt256) -> Result<Vec<ShardAccount>>,
+    F: FnOnce(Arc<dyn IndexProvider>, &HashBytes) -> Result<Vec<ShardAccount>>,
 {
     engine.load_instruction(Instruction::new(name))?;
-    engine.check_capability(GlobalCapabilities::CapIndexAccounts)?;
+    engine.check_capability(GlobalCapability::CapIndexAccounts)?;
     fetch_stack(engine, 1)?;
-    let hash = engine.cmd.var(0).as_slice()?.clone().get_next_hash()?;
+    let mut hash = engine.cmd.var(0).as_slice()?.clone();
+    let hash = hash.as_mut().load_u256()?;
     match engine.index_provider.clone() {
         Some(index_provider) => {
             let accounts = f(index_provider, &hash)?;

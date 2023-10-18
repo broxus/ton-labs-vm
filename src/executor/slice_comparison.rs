@@ -11,44 +11,31 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::CellSlice;
+use crate::types::Result;
+
 use crate::{
     executor::{engine::{Engine, storage::fetch_stack}, types::Instruction},
-    stack::{StackItem, integer::IntegerData}, types::Status,
+    stack::{integer::IntegerData, StackItem}, types::Status,
 };
-use ton_types::SliceData;
 
 fn unary<F>(engine: &mut Engine, name: &'static str, operation: F) -> Status
-where
-    F: Fn(&SliceData) -> StackItem
+    where
+        F: Fn(&CellSlice) -> StackItem
 {
     engine.load_instruction(
         Instruction::new(name)
     )?;
     fetch_stack(engine, 1)?;
     let slice = engine.cmd.var(0).as_slice()?.clone();
-    let r = operation(&slice);
+    let r = operation(&slice.as_ref());
     engine.cc.stack.push(r);
     Ok(())
 }
 
 fn binary<F>(engine: &mut Engine, name: &'static str, operation: F) -> Status
-where
-    F: Fn(SliceData, SliceData) -> StackItem
-{
-    engine.load_instruction(
-        Instruction::new(name)
-    )?;
-    fetch_stack(engine, 2)?;
-    let s0 = engine.cmd.var(0).as_slice()?.clone();
-    let s1 = engine.cmd.var(1).as_slice()?.clone();
-    let r = operation(s1, s0);
-    engine.cc.stack.push(r);
-    Ok(())
-}
-
-fn common_prefix<F>(engine: &mut Engine, name: &'static str, operation: F) -> Status
-where
-    F: Fn(Option<SliceData>, Option<SliceData>) -> StackItem
+    where
+        F: Fn(&CellSlice, &CellSlice) -> Result<StackItem>
 {
     engine.load_instruction(
         Instruction::new(name)
@@ -56,8 +43,23 @@ where
     fetch_stack(engine, 2)?;
     let s0 = engine.cmd.var(0).as_slice()?;
     let s1 = engine.cmd.var(1).as_slice()?;
-    let (_, r_s1, r_s0) = SliceData::common_prefix(s1, s0);
-    let r = operation(r_s1, r_s0);
+    let r = operation(s1.as_ref(), s0.as_ref());
+    engine.cc.stack.push(r?);
+    Ok(())
+}
+
+fn first_distinct_bit<F>(engine: &mut Engine, name: &'static str, operation: F) -> Status
+    where
+        F: Fn(Option<bool>, Option<bool>) -> StackItem
+{
+    engine.load_instruction(
+        Instruction::new(name)
+    )?;
+    fetch_stack(engine, 2)?;
+    let s0 = engine.cmd.var(0).as_slice()?.as_ref();
+    let s1 = engine.cmd.var(1).as_slice()?.as_ref();
+    let common_bits = s0.longest_common_data_prefix(s1).remaining_bits();
+    let r = operation(s1.get_bit(common_bits).ok(), s0.get_bit(common_bits).ok());
     engine.cc.stack.push(r);
     Ok(())
 }
@@ -66,7 +68,7 @@ where
 /// (i.e., contains no bits of data and no cell references).
 pub(super) fn execute_sempty(engine: &mut Engine) -> Status {
     unary(engine, "SEMPTY", |slice| boolean!(
-        (slice.remaining_bits() == 0) && (slice.remaining_references() == 0)
+        (slice.remaining_bits() == 0) && (slice.remaining_refs() == 0)
     ))
 }
 
@@ -76,33 +78,27 @@ pub(super) fn execute_sdempty(engine: &mut Engine) -> Status {
 }
 
 /// SREMPTY (s – r(s) = 0), checks whether Slice s has no refer- ences.
-pub(super) fn execute_srempty (engine: &mut Engine) -> Status {
-    unary(engine, "SREMPTY", |slice| boolean!(slice.remaining_references() == 0))
+pub(super) fn execute_srempty(engine: &mut Engine) -> Status {
+    unary(engine, "SREMPTY", |slice| boolean!(slice.remaining_refs() == 0))
 }
 
 /// SDFIRST (s – s0 = 1), checks whether the first bit of Slice s is a one.
-pub(super) fn execute_sdfirst (engine: &mut Engine) -> Status {
+pub(super) fn execute_sdfirst(engine: &mut Engine) -> Status {
     unary(engine, "SDFIRST", |slice| boolean!(
-        (slice.remaining_bits() != 0) && (slice.get_bit_opt(0) == Some(true))
+        (slice.remaining_bits() != 0) && (slice.get_bit(0) == Ok(true))
     ))
 }
 
 /// SDLEXCMP (s s′ – c), compares the data of s lexicographically
 /// with the data of s′, returning −1, 0, or 1 depending on the result. s > s` => 1
 pub(super) fn execute_sdlexcmp(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDLEXCMP", |r_s1, r_s0| int!(
-        if r_s0.is_none() && r_s1.is_none() {
-            0
-        } else if r_s0.is_some() && r_s1.is_some() {
-            if r_s1.unwrap().get_next_bit().unwrap() {
-                1
-            } else {
-                -1
-            }
-        } else if r_s1.is_some() {
-            1
-        } else {
-            -1
+    first_distinct_bit(engine, "SDLEXCMP", |r_s1, r_s0| int!(
+        match (r_s0, r_s1) {
+            (None, None) => 0,
+            (Some(_), Some(true)) => 1,
+            (Some(_), Some(false)) => -1,
+            (None, Some(_)) => 1,
+            (Some(_), None) => -1
         }
     ))
 }
@@ -110,102 +106,102 @@ pub(super) fn execute_sdlexcmp(engine: &mut Engine) -> Status {
 /// SDEQ(s s′ – s ≈ s′), checks whether the data parts of s and s′ coincide,
 /// equivalent to SDLEXCMP; ISZERO.
 pub(super) fn execute_sdeq(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDEQ", |r_s1, r_s0| boolean!(
+    first_distinct_bit(engine, "SDEQ", |r_s1, r_s0| boolean!(
         r_s0.is_none() && r_s1.is_none()
     ))
 }
 
 /// SDPFX (s s′ – ?), checks whether s is a prefix of s′.
 pub(super) fn execute_sdpfx(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDPFX", |r_s1, _| boolean!(r_s1.is_none()))
+    first_distinct_bit(engine, "SDPFX", |r_s1, _| boolean!(r_s1.is_none()))
 }
 
 /// SDPFXREV (s s′ – ?), checks whether s′ is a prefix of s, equivalent
 /// to SWAP; SDPFX.
 pub(super) fn execute_sdpfxrev(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDPFXREV", |_, r_s0| boolean!(r_s0.is_none()))
+    first_distinct_bit(engine, "SDPFXREV", |_, r_s0| boolean!(r_s0.is_none()))
 }
 
 /// SDPPFX (s s′ – ?), checks whether s is a proper prefix of s′
 /// (i.e., prefix distinct from s′).
 pub(super) fn execute_sdppfx(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDPPFX", |r_s1, r_s0| boolean!(
+    first_distinct_bit(engine, "SDPPFX", |r_s1, r_s0| boolean!(
         r_s0.is_some() && r_s1.is_none()
     ))
 }
 
 /// SDPPFXREV (s s′ – ?), checks whether s′ is a proper prefix of s.
 pub(super) fn execute_sdppfxrev(engine: &mut Engine) -> Status {
-    common_prefix(engine, "SDPPFXREV", |r_s1, r_s0| boolean!(
+    first_distinct_bit(engine, "SDPPFXREV", |r_s1, r_s0| boolean!(
         r_s0.is_none() && r_s1.is_some()
     ))
 }
 
 /// SDSFX(s s′ – ?), checks whether s is a suffix of s′.
 pub(super) fn execute_sdsfx(engine: &mut Engine) -> Status {
-    binary(engine, "SDSFX", |s1, mut s0| boolean!({
+    binary(engine, "SDSFX", |s1, s0| Ok(boolean!({
         let l0 = s0.remaining_bits();
         let l1 = s1.remaining_bits();
         if l1 <= l0 {
-            s0.shrink_data(l0 - l1..);
-            let (_, r_s0, r_s1) = SliceData::common_prefix(&s0, &s1);
-            r_s0.is_none() && r_s1.is_none()
+            let mut s0 = s0.clone();
+            s0.advance(l0 - l1, 0)?;
+            s0.longest_common_data_prefix(s1).remaining_bits() == l1
         } else {
             false
         }
-    }))
+    })))
 }
 
 /// SDSFXREV (s s′ – ?), checks whether s′ is a suffix of s.
 pub(super) fn execute_sdsfxrev(engine: &mut Engine) -> Status {
-    binary(engine, "SDSFXREV", |mut s1, s0| boolean!({
+    binary(engine, "SDSFXREV", |s1, s0| Ok(boolean!({
         let l0 = s0.remaining_bits();
         let l1 = s1.remaining_bits();
         if l0 <= l1 {
-            s1.shrink_data(l1 - l0..);
-            let (_, r_s0, r_s1) = SliceData::common_prefix(&s0, &s1);
-            r_s0.is_none() && r_s1.is_none()
+            let mut s1 = s1.clone();
+            s1.advance(l1 - l0, 0)?;
+            s1.longest_common_data_prefix(s0).remaining_bits() == l0
         } else {
             false
         }
-    }))
+    })))
 }
 
 ///  SDPSFX (s s′ – ?), checks whether s is a proper suffix of s′.
 pub(super) fn execute_sdpsfx(engine: &mut Engine) -> Status {
-    binary(engine, "SDPSFX", |s1, mut s0| boolean!({
+    binary(engine, "SDPSFX", |s1, s0| Ok(boolean!({
         let l0 = s0.remaining_bits();
         let l1 = s1.remaining_bits();
         if l1 < l0 {
-            s0.shrink_data(l0 - l1..);
-            let (_, r_s0, r_s1) = SliceData::common_prefix(&s0, &s1);
-            r_s0.is_none() && r_s1.is_none()
+            let mut s0 = s0.clone();
+            s0.advance(l0 - l1, 0)?;
+            s0.longest_common_data_prefix(s1).remaining_bits() == l1
         } else {
             false
         }
-    }))
+    })))
 }
 
 /// SDPSFXREV (s s′ – ?), checks whether s′ is a proper suffix of s.
 pub(super) fn execute_sdpsfxrev(engine: &mut Engine) -> Status {
-    binary(engine, "SDPSFXREV", |mut s1, s0| boolean!({
+    binary(engine, "SDPSFXREV", |s1, s0| Ok(boolean!({
         let l0 = s0.remaining_bits();
         let l1 = s1.remaining_bits();
         if l0 < l1 {
-            s1.shrink_data(l1 - l0..);
-            let (_, r_s0, r_s1) = SliceData::common_prefix(&s0, &s1);
-            r_s0.is_none() && r_s1.is_none()
+            let mut s1 = s1.clone();
+            s1.advance(l1 - l0, 0)?;
+            s1.longest_common_data_prefix(s0).remaining_bits() == l0
         } else {
             false
         }
-    }))
+    })))
 }
 
 /// SDCNTLEAD0 (s – n), returns the number of leading zeroes in s.
 pub(super) fn execute_sdcntlead0(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTLEAD0", |slice| int!({
         let n = slice.remaining_bits();
-        (0..n).position(|i| slice.get_bit_opt(i) == Some(true)).unwrap_or(n)
+        (0..n).position(|i| slice.get_bit(i) == Ok(true)).unwrap_or(n as usize)
     }))
 }
 
@@ -213,7 +209,7 @@ pub(super) fn execute_sdcntlead0(engine: &mut Engine) -> Status {
 pub(super) fn execute_sdcntlead1(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTLEAD1", |slice| int!({
         let n = slice.remaining_bits();
-        (0..n).position(|i| slice.get_bit_opt(i) == Some(false)).unwrap_or(n)
+        (0..n).position(|i| slice.get_bit(i) == Ok(false)).unwrap_or(n as usize)
     }))
 }
 
@@ -221,7 +217,7 @@ pub(super) fn execute_sdcntlead1(engine: &mut Engine) -> Status {
 pub(super) fn execute_sdcnttrail0(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTTRAIL0", |slice| int!({
         let n = slice.remaining_bits();
-        (0..n).position(|i| slice.get_bit_opt(n - i - 1) == Some(true)).unwrap_or(n)
+        (0..n).position(|i| slice.get_bit(n - i - 1) == Ok(true)).unwrap_or(n as usize)
     }))
 }
 
@@ -229,7 +225,7 @@ pub(super) fn execute_sdcnttrail0(engine: &mut Engine) -> Status {
 pub(super) fn execute_sdcnttrail1(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTTRAIL1", |slice| int!({
         let n = slice.remaining_bits();
-        (0..n).position(|i| slice.get_bit_opt(n - i - 1) == Some(false)).unwrap_or(n)
+        (0..n).position(|i| slice.get_bit(n - i - 1) == Ok(false)).unwrap_or(n as usize)
     }))
 }
 

@@ -22,12 +22,10 @@ use crate::{
             IntegerData,
         },
         serialization::{Deserializer, Serializer},
-        BuilderData,
     },
-    types::Exception,
+    types::{Exception, ExceptionCode, Result}
 };
-use smallvec::SmallVec;
-use ton_types::{error, ExceptionCode, Result};
+use everscale_types::cell::CellBuilder;
 
 pub struct UnsignedIntegerBigEndianEncoding {
     length_in_bits: usize
@@ -40,7 +38,7 @@ impl Encoding for UnsignedIntegerBigEndianEncoding {
 }
 
 impl Serializer<IntegerData> for UnsignedIntegerBigEndianEncoding {
-    fn try_serialize(&self, value: &IntegerData) -> Result<BuilderData> {
+    fn try_serialize(&self, value: &IntegerData, builder: &mut CellBuilder) -> Result<()> {
         value.check_neg()?;
         if !value.ufits_in(self.length_in_bits)? {
             // Spec. 3.2.7
@@ -61,7 +59,8 @@ impl Serializer<IntegerData> for UnsignedIntegerBigEndianEncoding {
         let mut buffer = value.to_bytes_be();
         buffer = extend_buffer_be(buffer, self.length_in_bits, false);
 
-        BuilderData::with_raw(SmallVec::from_vec(buffer), self.length_in_bits)
+        builder.store_raw(buffer.as_slice(), self.length_in_bits as u16)?;
+        Ok(())
     }
 }
 

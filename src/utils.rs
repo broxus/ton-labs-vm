@@ -11,68 +11,19 @@
 * limitations under the License.
 */
 
-use crate::{error::TvmError, types::Exception};
-use ton_types::{
-    error, fail, 
-    BuilderData, Cell, ExceptionCode, GasConsumer, MAX_DATA_BITS, Result, SliceData
-};
+use crate::OwnedCellSlice;
+use crate::types::Result;
 
-/// Pack data as a list of single-reference cells
-pub fn pack_data_to_cell(bytes: &[u8], engine: &mut dyn GasConsumer) -> Result<Cell> {
-    let mut cell = BuilderData::default();
-    let cell_length_in_bytes = MAX_DATA_BITS / 8;
-    for cur_slice in bytes.chunks(cell_length_in_bytes).rev() {
-        if cell.bits_used() != 0 {
-            let mut new_cell = BuilderData::new();
-            new_cell.checked_append_reference(engine.finalize_cell(cell)?)?;
-            cell = new_cell;
-        }
-        cell.append_raw(cur_slice, cur_slice.len() * 8)?;
+pub fn get_dictionary_opt(slice: &mut OwnedCellSlice) -> Result<Option<OwnedCellSlice>> {
+    let mut root = slice.clone();
+    if slice.as_mut().load_bit()? == false {
+        root.as_mut().shrink(None, Some(0))?;
+    } else if slice.as_ref().remaining_refs() == 0 {
+        return Ok(None);
+    } else {
+        slice.as_mut().load_reference()?;
+        root.as_mut().shrink(None, Some(1))?;
     }
-    engine.finalize_cell(cell)
-}
-
-/// Pack string as a list of single-reference cells
-pub fn pack_string_to_cell(string: &str, engine: &mut dyn GasConsumer) -> Result<Cell> {
-    pack_data_to_cell(string.as_bytes(), engine)
-}
-
-/// Unpack data as a list of single-reference cells
-pub fn unpack_data_from_cell(
-    mut cell: SliceData, 
-    engine: &mut dyn GasConsumer,
-) -> Result<Vec<u8>> {
-    let mut data = vec![];
-    loop {
-        if cell.remaining_bits() % 8 != 0 {
-            fail!(
-                "Cannot parse string from cell because of length of cell bits len: {}",
-                cell.remaining_bits()
-            )
-        }
-        data.extend_from_slice(&cell.get_bytestring(0));
-        match cell.remaining_references() {
-            0 => return Ok(data),
-            1 => cell = engine.load_cell(cell.reference(0)?)?,
-            _ => return err!(
-                ExceptionCode::TypeCheckError,
-                "Incorrect representation of string in cells"
-            )
-        }
-    }
-}
-
-pub(crate) fn bytes_to_string(data: Vec<u8>) -> Result<String> {
-    String::from_utf8(data).map_err(|err| {
-        exception!(
-            ExceptionCode::TypeCheckError,
-            "Cannot create utf8 string: {}",
-            err
-        )
-    })
-}
-
-/// Unpack string as a list of single-reference cells
-pub fn unpack_string_from_cell(cell: SliceData, engine: &mut dyn GasConsumer) -> Result<String> {
-    bytes_to_string(unpack_data_from_cell(cell, engine)?)
+    root.as_mut().shrink(Some(1), None)?;
+    Ok(Some(root))
 }

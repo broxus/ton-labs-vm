@@ -11,13 +11,14 @@
 * limitations under the License.
 */
 
+use everscale_types::cell::{Cell, CellFamily, HashBytes};
+use everscale_types::models::{CurrencyCollection, GlobalCapabilities, GlobalCapability};
 use crate::stack::{
     StackItem,
     integer::IntegerData,
 };
 use sha2::{Sha256, Digest};
-use ton_block::{GlobalCapabilities, CurrencyCollection};
-use ton_types::{Cell, HashmapE, HashmapType, SliceData, types::UInt256};
+use crate::OwnedCellSlice;
 
 /*
 The smart-contract information
@@ -29,9 +30,12 @@ unixtime:uint32 block_lt:uint64 trans_lt:uint64
 rand_seed:uint256 balance_remaining:CurrencyCollection
 myself:MsgAddress = SmartContractInfo;
 */
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+// TODO drop deprecated
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmartContractInfo {
+    // deprecated?
     pub actions: u16,
+    // deprecated?
     pub msgs_sent: u16,
     pub unix_time: u32,
     pub block_lt: u64,
@@ -39,28 +43,49 @@ pub struct SmartContractInfo {
     pub seq_no: u32,
     pub rand_seed: IntegerData,
     pub balance: CurrencyCollection,
-    pub balance_remaining_grams: u128,
-    pub balance_remaining_other: HashmapE,
-    pub myself: SliceData,
+    pub myself: OwnedCellSlice,
     pub config_params: Option<Cell>, // config params from masterchain
     pub mycode: Cell,
-    pub init_code_hash: UInt256,
+    pub init_code_hash: HashBytes,
     pub storage_fee_collected: u128,
-    pub capabilities: u64,
+    pub capabilities: GlobalCapabilities,
+}
+
+impl Default for SmartContractInfo {
+    fn default() -> Self {
+        Self {
+            actions: 0,
+            msgs_sent: 0,
+            unix_time: 0,
+            block_lt: 0,
+            trans_lt: 0,
+            seq_no: 0,
+            rand_seed: Default::default(),
+            balance: Default::default(),
+            myself: OwnedCellSlice::empty(),
+            config_params: None,
+            mycode: Cell::empty_cell(),
+            init_code_hash: Default::default(),
+            storage_fee_collected: 0,
+            capabilities: GlobalCapabilities::new(0),
+        }
+    }
 }
 
 impl SmartContractInfo{
-    pub fn with_myself(myself: SliceData) -> Self {
+    pub fn with_myself(myself: OwnedCellSlice) -> Self {
         Self {
             myself,
             ..Self::default()
         }
     }
 
-    // for compatibility with old 
+    // for compatibility with old
     pub fn old_default(mycode: Cell) -> Self {
         Self {
-            capabilities: GlobalCapabilities::CapInitCodeHash as u64 | GlobalCapabilities::CapMycode as u64,
+            capabilities: GlobalCapabilities::new(
+                (GlobalCapability::CapInitCodeHash | GlobalCapability::CapMyCode).into()
+            ),
             mycode,
             ..Default::default()
         }
@@ -118,11 +143,11 @@ impl SmartContractInfo{
             The rand_seed field here is initialized deterministically starting from the
         rand_seed of the block, and the account address.
     */
-    pub fn calc_rand_seed(&mut self, rand_seed_block: UInt256, account_address_anycast: &[u8]) {
+    pub fn calc_rand_seed(&mut self, rand_seed_block: HashBytes, account_address_anycast: &[u8]) {
         // combine all parameters to vec and calculate hash of them
-        self.rand_seed = if !rand_seed_block.is_zero() {
+        self.rand_seed = if rand_seed_block != HashBytes::ZERO {
             let mut hasher = Sha256::new();
-            hasher.update(&rand_seed_block);
+            hasher.update(rand_seed_block.0);
             hasher.update(account_address_anycast);
 
             let sha256 = hasher.finalize();
@@ -134,17 +159,7 @@ impl SmartContractInfo{
         };
     }
 
-    #[deprecated]
-    pub fn balance_remaining_grams_mut(&mut self) -> &mut u128 {
-        &mut self.balance_remaining_grams
-    }
-
-    #[deprecated]
-    pub fn balance_remaining_other_mut(&mut self) -> &mut HashmapE {
-        &mut self.balance_remaining_other
-    }
-
-    pub fn set_init_code_hash(&mut self, init_code_hash: UInt256) {
+    pub fn set_init_code_hash(&mut self, init_code_hash: HashBytes) {
         self.init_code_hash = init_code_hash;
     }
 
@@ -153,13 +168,6 @@ impl SmartContractInfo{
     }
 
     pub fn into_temp_data_item(self) -> StackItem {
-        debug_assert_eq!(self.balance_remaining_grams, 0, "use balance instead old");
-        debug_assert!(self.balance_remaining_other.data().is_none(), "use balance instead old");
-
-        let balance = std::cmp::max(self.balance_remaining_grams, self.balance.grams.as_u128());
-        let balance_other = self.balance_remaining_other.data().cloned()
-            .or_else(|| self.balance.other_as_hashmap().data().cloned());
-
         let mut params = vec![
             int!(0x076ef1ea),      // magic - should be changed because of structure change
             int!(self.actions),    // actions
@@ -169,21 +177,21 @@ impl SmartContractInfo{
             int!(self.trans_lt),   // transaction time
             StackItem::int(self.rand_seed),
             StackItem::tuple(vec![
-                int!(balance),
-                balance_other.map_or(StackItem::None, StackItem::Cell)
+                int!(self.balance.tokens.into_inner()),
+                self.balance.other.as_dict().root().clone().map_or(StackItem::None, StackItem::Cell)
             ]),
             StackItem::Slice(self.myself),
             self.config_params.map_or(StackItem::None, StackItem::Cell),
         ];
         let mut additional_params = vec![
-            (GlobalCapabilities::CapMycode, StackItem::cell(self.mycode.clone())),
-            (GlobalCapabilities::CapInitCodeHash, StackItem::int(IntegerData::from_unsigned_bytes_be(self.init_code_hash.as_slice()))),
-            (GlobalCapabilities::CapStorageFeeToTvm, StackItem::int(self.storage_fee_collected)),
-            (GlobalCapabilities::CapDelections, StackItem::int(self.seq_no)),
+            (GlobalCapability::CapMyCode, StackItem::cell(self.mycode.clone())),
+            (GlobalCapability::CapInitCodeHash, StackItem::int(IntegerData::from_unsigned_bytes_be(self.init_code_hash.as_slice()))),
+            (GlobalCapability::CapStorageFeeToTvm, StackItem::int(self.storage_fee_collected)),
+            (GlobalCapability::CapDelections, StackItem::int(self.seq_no)),
         ];
         let add_params = &mut Vec::new();
         for (i, (caps, f)) in additional_params.drain(..).enumerate() {
-            if (self.capabilities & caps as u64) != 0 {
+            if self.capabilities.contains(caps) {
                 for _ in add_params.len()..i {
                     add_params.push(StackItem::default());
                 }
@@ -191,26 +199,26 @@ impl SmartContractInfo{
             }
         }
         params.append(add_params);
-        debug_assert!(params.len() <= 14, "{:?} caps: {:X}", params, self.capabilities);
+        debug_assert!(params.len() <= 14, "{:?} caps: {:X}", params, self.capabilities.into_inner());
         StackItem::tuple(vec![StackItem::tuple(params)])
     }
 
     #[deprecated]
     pub fn into_temp_data_with_init_code_hash(mut self, is_init_code_hash: bool, with_mycode: bool) -> StackItem {
-        if is_init_code_hash { self.capabilities |= GlobalCapabilities::CapInitCodeHash as u64 }
-        if with_mycode { self.capabilities |= GlobalCapabilities::CapMycode as u64 }
+        if is_init_code_hash { self.capabilities |= GlobalCapability::CapInitCodeHash }
+        if with_mycode { self.capabilities |= GlobalCapability::CapMyCode}
         self.into_temp_data_item()
     }
 
     #[deprecated]
     pub fn into_temp_data(mut self) -> StackItem {
-        self.capabilities |= GlobalCapabilities::CapInitCodeHash as u64 | GlobalCapabilities::CapMycode as u64;
+        self.capabilities |= (GlobalCapability::CapInitCodeHash | GlobalCapability::CapMyCode).into_inner();
         self.into_temp_data_item()
     }
 
     #[deprecated]
     pub fn into_temp_data_with_capabilities(mut self, capabilities: u64) -> StackItem {
-        self.capabilities = capabilities;
+        self.capabilities = GlobalCapabilities::new(capabilities);
         self.into_temp_data_item()
 
     }

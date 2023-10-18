@@ -18,11 +18,10 @@ use crate::{
         microcode::{CTRL, VAR, SAVELIST, CC}, types::{Instruction, InstructionOptions}
     },
     stack::{StackItem, continuation::{ContinuationType, ContinuationData}, integer::IntegerData},
-    types::{Exception, Status}
+    types::{ExceptionCode, Exception, Status}
 };
 use std::ops::Range;
-use ton_block::GlobalCapabilities;
-use ton_types::{error, fail, types::ExceptionCode};
+use everscale_types::models::GlobalCapability;
 
 //Utilities **********************************************************************************
 //(c c' -)
@@ -37,7 +36,7 @@ fn init_try_catch(engine: &mut Engine, keep: bool) -> Status {
     }
     let depth: u32 = engine.cc.stack.depth().try_into()?;
     engine.cmd.var(1).as_continuation()?;
-    let bugfix = engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64);
+    let bugfix = engine.has_capability(GlobalCapability::CapsTvmBugfixes2022);
     engine.cmd.var_mut(0).as_continuation_mut().map(|catch_cont| {
         catch_cont.type_of = ContinuationType::TryCatch;
         if !bugfix {
@@ -261,7 +260,7 @@ pub(super) fn execute_tryargs(engine: &mut Engine) -> Status {
 }
 
 pub(super) fn execute_trykeep(engine: &mut Engine) -> Status {
-    if !engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
+    if !engine.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
         return Status::Err(ExceptionCode::InvalidOpcode.into());
     }
     engine.load_instruction(

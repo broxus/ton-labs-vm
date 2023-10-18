@@ -14,9 +14,9 @@
 use crate::{
     error::TvmError,
     executor::{Mask, engine::Engine, types::{Instruction, InstructionOptions}},
-    stack::StackItem, types::{Exception, Status}
+    stack::StackItem, types::{Exception, Status},
+    types::ExceptionCode,
 };
-use ton_types::{error, types::ExceptionCode};
 use std::{cmp, str, sync::Arc};
 
 const STR:   u8 = 0x01;
@@ -42,31 +42,47 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
     if how.bit(HEX) {
         match item {
             StackItem::None            => String::new(),
-            StackItem::Builder(x)      => format!("BC<{:X}>", Arc::as_ref(x)),
-            StackItem::Cell(x)         => format!("C<{:X}>", x),
-            StackItem::Continuation(x) => format!("R<{:X}>", x.code().cell()),
-            StackItem::Integer(x)      => format!("{:X}", Arc::as_ref(x)),
-            StackItem::Slice(x)        => format!("CS<{:X}>({}..{})", x, x.pos(), x.pos() + x.remaining_bits()),
+            StackItem::Builder(x)      =>
+                format!("BC<{}>", x.display_data().to_string().to_ascii_uppercase()),
+            StackItem::Cell(x)         =>
+                format!("C<{}>", x.display_data().to_string().to_ascii_uppercase()),
+            StackItem::Continuation(x) =>
+                format!("R<{}>", x.code().cell().display_data().to_string().to_ascii_uppercase()),
+            StackItem::Integer(x)      =>
+                format!("{:X}", Arc::as_ref(x)),
+            StackItem::Slice(x)        =>
+                format!("CS<{}>({}..{})",
+                        x.as_ref().display_data().to_string().to_ascii_uppercase(),
+                        x.as_ref().bits_offset(),
+                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple),
         }
     } else if how.bit(BIN) {
         match item {
             StackItem::None            => String::new(),
-            StackItem::Builder(x)      => format!("BC<{:b}>", Arc::as_ref(x)),
-            StackItem::Cell(x)         => format!("C<{:b}>", x),
-            StackItem::Continuation(x) => format!("R<{:b}>", x.code().cell()),
+            StackItem::Builder(x)      => format!("BC<{:b}>", x.display_data()),
+            StackItem::Cell(x)         => format!("C<{:b}>", x.display_data()),
+            StackItem::Continuation(x) => format!("R<{:b}>", x.code().cell().display_data()),
             StackItem::Integer(x)      => format!("{:b}", Arc::as_ref(x)),
-            StackItem::Slice(x)        => format!("CS<{:b}>({}..{})", x.cell(), x.pos(), x.pos() + x.remaining_bits()),
+            StackItem::Slice(x)        =>
+                format!("CS<{:b}>({}..{})",
+                        x.cell().display_data(),
+                        x.as_ref().bits_offset(),
+                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple),
         }
     } else if how.bit(STR) {
         let string = match item {
             StackItem::None            => return String::new(),
-            StackItem::Builder(x)      => x.data().to_vec(),
-            StackItem::Cell(x)         => x.data().to_vec(),
-            StackItem::Continuation(x) => x.code().get_bytestring(0),
+            StackItem::Builder(x)      => x.raw_data().to_vec(),
+            StackItem::Cell(x)         => x.as_ref().data().to_vec(),
+            StackItem::Continuation(x) => x.code().as_ref()
+                .get_raw(0, &mut [0; 128], x.code().as_ref().remaining_bits())
+                .unwrap_or_default().to_vec(),
             StackItem::Integer(x)      => return format!("{}", Arc::as_ref(x)),
-            StackItem::Slice(x)        => x.get_bytestring(0),
+            StackItem::Slice(x)        => x.as_ref()
+                .get_raw(0, &mut [0; 128], x.as_ref().remaining_bits())
+                .unwrap_or_default().to_vec(),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple).as_bytes().to_vec(),
         };
         match str::from_utf8(&string) {
@@ -76,12 +92,20 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
     } else {
         match item {
             StackItem::None            => String::new(),
-            StackItem::Builder(x)      => format!("BC<{:X}>", Arc::as_ref(x)),
-            StackItem::Cell(x)         => format!("C<{:X}>", x),
-            StackItem::Continuation(x) => format!("R<{:X}>", x.code().cell()),
-            StackItem::Integer(x)      => format!("{}", Arc::as_ref(x)),
-            StackItem::Slice(x)        => format!("CS<{:X}>({}..{})", x.cell(), x.pos(), x.pos() + x.remaining_bits()),
-            StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple),
+            StackItem::Builder(x)      =>
+                format!("BC<{}>", x.display_data().to_string().to_ascii_uppercase()),
+            StackItem::Cell(x)         =>
+                format!("C<{}>", x.display_data().to_string().to_ascii_uppercase()),
+            StackItem::Continuation(x) =>
+                format!("R<{}>", x.code().cell().display_data().to_string().to_ascii_uppercase()),
+            StackItem::Integer(x)      =>
+                format!("{}", Arc::as_ref(x)),
+            StackItem::Slice(x)        =>
+                format!("CS<{}>({}..{})",
+                        x.as_ref().display_data().to_string().to_ascii_uppercase(),
+                        x.as_ref().bits_offset(),
+                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
+            StackItem::Tuple(x) => dump_tuple_impl(x, how, in_tuple),
         }
     }
 }
@@ -230,13 +254,16 @@ where F: FnOnce(&mut Engine, &str) -> Status {
     engine.load_instruction(
         Instruction::new(name).set_opts(InstructionOptions::Bytestring(12, 0, 4, 1))
     )?;
-    match str::from_utf8(&engine.cmd.slice().get_bytestring(8)) {
-        Ok(string) => {
-            if engine.debug() {
-                op(engine, string)?
+    if engine.debug() {
+        let slice = engine.cmd.slice().as_ref();
+        match str::from_utf8(slice.get_raw(0, &mut [0; 128], slice.remaining_bits()).unwrap_or_default()) {
+            Ok(string) => {
+                if engine.debug() {
+                    op(engine, string)?
+                }
             }
+            Err(err) => return err!(ExceptionCode::InvalidOpcode, "convert from utf-8 error {}", err)
         }
-        Err(err) => return err!(ExceptionCode::InvalidOpcode, "convert from utf-8 error {}", err)
     }
     if how.bit(FLUSH) {
         engine.flush();

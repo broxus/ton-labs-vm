@@ -21,7 +21,7 @@ use crate::stack::integer::{
     }
 };
 use num_traits::Zero;
-use ton_types::{Result, Status};
+use crate::types::{Result, Status};
 
 // [x / y] -> (q, r)  :  q*y + r = x  :  |r| < |y|
 #[derive(Copy, Clone, Eq, PartialEq)]

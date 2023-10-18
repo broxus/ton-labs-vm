@@ -55,7 +55,7 @@ fn execute_setget_globalvar(engine: &mut Engine, name: &'static str, how: u8) ->
         } else {
             0
         };
-        engine.use_gas(Gas::tuple_gas_price(len));
+        engine.gas_consumer.gas_mut().use_gas(Gas::tuple_gas_price(len));
         engine.ctrls.put(7, &mut StackItem::tuple(c7))?;
     } else {
         let x = engine.ctrl(7)?.tuple_item(k, true)?;
