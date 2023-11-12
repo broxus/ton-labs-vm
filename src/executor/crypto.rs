@@ -72,10 +72,8 @@ pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let slice = engine.cmd.var(0).as_slice()?.as_ref();
     if slice.remaining_bits() % 8 == 0 {
-        let mut bytes = [0; 32];
-        let bytes = slice.get_raw(0, &mut bytes, slice.remaining_bits())?;
-        let hash_int = hash_to_uint(sha2::Sha256::digest(bytes));
-        engine.cc.stack.push(StackItem::integer(hash_int));
+        let hash = sha2::Sha256::digest(slice.get_raw(0, &mut [0; 32], slice.remaining_bits())?);
+        engine.cc.stack.push(StackItem::integer(hash_to_uint(hash)));
         Ok(())
     } else {
         err!(ExceptionCode::CellUnderflow)
@@ -90,7 +88,8 @@ enum DataForSignature {
 impl AsRef<[u8]> for DataForSignature {
     fn as_ref(&self) -> &[u8] {
         match self {
-            DataForSignature::Hash(hash) => hash.raw_data(),
+            DataForSignature::Hash(hash) =>
+                &hash.raw_data()[..(hash.bit_len() as usize + 7) / 8],
             DataForSignature::Slice(slice) => slice.as_slice()
         }
     }
@@ -145,7 +144,7 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
     let mut signature = [0; SIGNATURE_BYTES];
     engine.cmd.var(1).as_slice()?.as_ref().get_raw(0, &mut signature, SIGNATURE_BITS)?;
     let data = preprocess_signed_data(engine, data.as_ref());
-    let result = engine.modifiers.chksig_always_succeed || pub_key.verify(&*data, &signature);
+    let result = engine.modifiers.chksig_always_succeed || pub_key.verify_raw(&*data, &signature);
     engine.cc.stack.push(boolean!(result));
     Ok(())
 }
