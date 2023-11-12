@@ -24,16 +24,17 @@ use crate::executor::gas::gas_state::Gas;
 pub mod gas_state;
 
 fn gramtogas(gas: &Gas, nanograms: &IntegerData) -> Result<i64> {
-    let gas_price = IntegerData::from_i64(gas.price());
+    let gas_price = IntegerData::from_u64(gas.price());
     let gas = nanograms.div::<Quiet>(&gas_price, Round::FloorToZero)?.0;
     let ret = gas.take_value_of(|x| i64::from_int(x).ok()).unwrap_or(i64::MAX);
     Ok(ret)
 }
+
 fn setgaslimit(gas: &mut Gas, gas_limit: i64) -> Status {
-    if gas_limit < gas.used() {
+    if gas_limit < 0 || gas.used() > gas_limit as u64 {
         return err!(ExceptionCode::OutOfGas);
     }
-    gas.new_gas_limit(gas_limit);
+    gas.new_gas_limit(gas_limit as u64);
     Ok(())
 }
 
@@ -41,7 +42,7 @@ fn setgaslimit(gas: &mut Gas, gas_limit: i64) -> Status {
 // ACCEPT - F800
 pub fn execute_accept(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("ACCEPT"))?;
-    engine.gas_consumer.gas_mut().new_gas_limit(i64::MAX);
+    engine.gas_consumer.gas_mut().new_gas_limit(i64::MAX as u64);
     Ok(())
 }
 // Application-specific primitives - A.11; Gas-related primitives - A.11.2
@@ -84,7 +85,7 @@ pub fn execute_gastogram(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let gas = engine.cmd.var(0).as_integer()?;
     let gas_price = engine.gas_consumer.gas().price();
-    let nanogram_output = gas.mul::<Quiet>(&IntegerData::from_i64(gas_price))?;
+    let nanogram_output = gas.mul::<Quiet>(&IntegerData::from_u64(gas_price))?;
     engine.cc.stack.push(StackItem::int(nanogram_output));
     Ok(())
 }

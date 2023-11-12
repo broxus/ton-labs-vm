@@ -2,7 +2,7 @@ use std::fmt::Formatter;
 
 use everscale_types::cell::{CellBuilder, CellSlice};
 use everscale_types::error::Error;
-use everscale_types::prelude::{Cell, CellFamily, CellSliceParts, Store};
+use everscale_types::prelude::{Cell, CellFamily, CellSliceParts};
 
 use crate::Fmt;
 
@@ -115,9 +115,7 @@ impl OwnedCellSlice {
             && range.remaining_bits() == self.cell.bit_len() {
             Ok(self.cell)
         } else {
-            let mut builder = CellBuilder::new();
-            self.cell_slice.store_into(&mut builder, &mut Cell::empty_context())?;
-            builder.build()
+            CellBuilder::build_from(&self.cell_slice)
         }
     }
 }

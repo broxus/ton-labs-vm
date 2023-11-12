@@ -21,5 +21,4 @@ everscale-crypto = "0.2"
 
 [features]
 fift_check = []
-log_file = []
 verbose = []

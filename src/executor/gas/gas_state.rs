@@ -12,198 +12,140 @@
 */
 
 use crate::{error::TvmError, types::{Exception, Result, ExceptionCode}};
-use std::cmp::{max, min};
+use std::cmp::min;
 
-// Gas state
+/// [everscale_types::models::transaction::ExecutedComputePhase]
+/// induces strict limits on values per TLB schema
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Gas {
-    gas_limit_max: i64,
-    gas_limit: i64,
-    gas_credit: i64,
-    gas_remaining: i64,
-    gas_price: i64,
-    gas_base: i64,
+    gas_limit_max: u64, // limits gas_used => valuable 56 bits
+    gas_limit: u64, // stored 56 bits
+    gas_credit: u32, // stored 24 bits
+    gas_used: u64, // stored 56 bits
+    gas_price: u64,
+    gas_base: u64, // limits gas_used => valuable 56 bits
 }
 
-const CELL_LOAD_GAS_PRICE: i64 = 100;
-const CELL_RELOAD_GAS_PRICE: i64 = 25;
-const CELL_CREATE_GAS_PRICE: i64 = 500;
-const EXCEPTION_GAS_PRICE: i64 = 50;
-const TUPLE_ENTRY_GAS_PRICE: i64 = 1;
-const IMPLICIT_JMPREF_GAS_PRICE: i64 = 10;
-const IMPLICIT_RET_GAS_PRICE: i64 = 5;
+const CELL_LOAD_GAS_PRICE: u64 = 100;
+const CELL_RELOAD_GAS_PRICE: u64 = 25;
+const CELL_CREATE_GAS_PRICE: u64 = 500;
+const EXCEPTION_GAS_PRICE: u64 = 50;
+const TUPLE_ENTRY_GAS_PRICE: u64 = 1;
+const IMPLICIT_JMPREF_GAS_PRICE: u64 = 10;
+const IMPLICIT_RET_GAS_PRICE: u64 = 5;
 const FREE_STACK_DEPTH: usize = 32;
-const STACK_ENTRY_GAS_PRICE: i64 = 1;
+const STACK_ENTRY_GAS_PRICE: u64 = 1;
 // const MAX_DATA_DEPTH: usize = 512;
 
 impl Gas {
-    /// Instance for constructors. Empty fields
-    pub const fn empty() -> Gas {
-        Gas {
-            gas_limit_max: 0,
-            gas_limit: 0,
-            gas_credit: 0,
-            gas_remaining: 0,
-            gas_price: 0,
-            gas_base: 0,
-        }
-    }
-    /// Instance for debug and test. Cheat fields
-    pub const fn test() -> Gas {
-        Gas {
-            gas_price: 10,
-            gas_limit: 1000000000,
-            gas_limit_max: 1000000000,
-            gas_remaining: 1000000000,
-            gas_credit: 0,
-            gas_base: 1000000000,
-        }
-    }
     /// Instance for release
-    pub fn test_with_limit(gas_limit: i64) -> Gas {
-        let mut gas = Gas::test();
-        gas.new_gas_limit(gas_limit);
-        gas
-    }
-    /// Instance for release
-    pub fn test_with_credit(gas_credit: i64) -> Gas {
-        Gas::new(0, gas_credit, 1000000000, 10)
-    }
-    /// Instance for release
-    pub const fn new(gas_limit: i64, gas_credit: i64, gas_limit_max: i64, gas_price: i64) -> Gas {
-        let remaining = gas_limit + gas_credit;
+    pub const fn new(gas_limit: u64, gas_credit: u32, gas_limit_max: u64, gas_price: u64) -> Gas {
         Gas {
             gas_price,
             gas_limit,
             gas_limit_max,
-            gas_remaining: remaining,
+            gas_used: 0,
             gas_credit,
-            gas_base: remaining,
+            gas_base: gas_limit + gas_credit as u64,
         }
     }
     /// Compute instruction cost
-    pub const fn basic_gas_price(instruction_length: usize, _instruction_references_count: usize) -> i64 {
-        // old formula from spec: (10 + instruction_length + 5 * instruction_references_count) as i64
-        (10 + instruction_length) as i64
-    }
-    pub fn consume_basic(&mut self, instruction_length: usize, _instruction_references_count: usize) -> i64 {
-        // old formula from spec: (10 + instruction_length + 5 * instruction_references_count) as i64
-        self.use_gas((10 + instruction_length) as i64)
+    pub const fn basic_gas_price(instruction_length: usize, _instruction_references_count: usize) -> u64 {
+        // old formula from spec: (10 + instruction_length + 5 * instruction_references_count) as u64
+        (10 + instruction_length) as u64
     }
 
     /// Compute exception cost
-    pub const fn exception_price() -> i64 {
+    pub const fn exception_price() -> u64 {
         EXCEPTION_GAS_PRICE
     }
-    pub fn consume_exception(&mut self) -> i64 {
-        self.use_gas(EXCEPTION_GAS_PRICE)
-    }
 
     /// Compute exception cost
-    pub const fn finalize_price() -> i64 {
+    pub const fn finalize_price() -> u64 {
         CELL_CREATE_GAS_PRICE
-    }
-    pub fn consume_finalize(&mut self) -> i64 {
-        self.use_gas(CELL_CREATE_GAS_PRICE)
     }
 
     /// Implicit JMP cost
-    pub const fn implicit_jmp_price() -> i64 {
+    pub const fn implicit_jmp_price() -> u64 {
         IMPLICIT_JMPREF_GAS_PRICE
-    }
-    pub fn consume_implicit_jmp(&mut self) -> i64 {
-        self.use_gas(IMPLICIT_JMPREF_GAS_PRICE)
     }
 
     /// Implicit RET cost
-    pub const fn implicit_ret_price() -> i64 {
+    pub const fn implicit_ret_price() -> u64 {
         IMPLICIT_RET_GAS_PRICE
-    }
-    pub fn consume_implicit_ret(&mut self) -> i64 {
-        self.use_gas(IMPLICIT_RET_GAS_PRICE)
     }
 
     /// Compute exception cost
-    pub const fn load_cell_price(first: bool) -> i64 {
+    pub const fn load_cell_price(first: bool) -> u64 {
         if first {CELL_LOAD_GAS_PRICE} else {CELL_RELOAD_GAS_PRICE}
-    }
-    pub fn consume_load_cell(&mut self, first: bool) -> i64 {
-        self.use_gas(if first {CELL_LOAD_GAS_PRICE} else {CELL_RELOAD_GAS_PRICE})
     }
 
     /// Stack cost
-    pub const fn stack_price(stack_depth: usize) -> i64 {
+    pub const fn stack_price(stack_depth: usize) -> u64 {
         let depth = if stack_depth > FREE_STACK_DEPTH {
             stack_depth
         } else {
             FREE_STACK_DEPTH
         };
-        STACK_ENTRY_GAS_PRICE * (depth - FREE_STACK_DEPTH) as i64
-    }
-    pub fn consume_stack(&mut self, stack_depth: usize) -> i64 {
-        self.use_gas(
-            STACK_ENTRY_GAS_PRICE * (max(stack_depth, FREE_STACK_DEPTH) - FREE_STACK_DEPTH) as i64
-        )
+        STACK_ENTRY_GAS_PRICE * (depth - FREE_STACK_DEPTH) as u64
     }
 
     /// Compute tuple usage cost
-    pub const fn tuple_gas_price(tuple_length: usize) -> i64 {
-        TUPLE_ENTRY_GAS_PRICE * tuple_length as i64
-    }
-    pub fn consume_tuple_gas(&mut self, tuple_length: usize) -> i64 {
-        self.use_gas(TUPLE_ENTRY_GAS_PRICE * tuple_length as i64)
+    pub const fn tuple_gas_price(tuple_length: usize) -> u64 {
+        TUPLE_ENTRY_GAS_PRICE * tuple_length as u64
     }
 
     /// Set input gas to gas limit
-    pub fn new_gas_limit(&mut self, gas_limit: i64) {
-        self.gas_limit = max(0, min(gas_limit, self.gas_limit_max));
+    pub fn new_gas_limit(&mut self, gas_limit: u64) {
+        self.gas_limit = min(gas_limit, self.gas_limit_max);
         self.gas_credit = 0;
-        self.gas_remaining += self.gas_limit - self.gas_base;
         self.gas_base = self.gas_limit;
     }
 
     /// Update remaining gas limit
-    pub fn use_gas(&mut self, gas: i64) -> i64 {
-        self.gas_remaining -= gas;
-        self.gas_remaining
+    pub fn use_gas(&mut self, gas: u64) {
+        self.gas_used += gas;
     }
 
     /// Try to consume gas then raise exception out of gas if needed
-    pub fn try_use_gas(&mut self, gas: i64) -> Result<()> {
-        self.gas_remaining -= gas;
-        self.check_gas_remaining()?;
-        Ok(())
+    pub fn try_use_gas(&mut self, gas: u64) -> Result<()> {
+        self.gas_used += gas;
+        self.check_gas_remaining()
     }
 
     /// Raise out of gas exception
-    pub fn check_gas_remaining(&self) -> Result<Option<i32>> {
-        if self.gas_remaining >= 0 {
-            Ok(None)
+    pub fn check_gas_remaining(&self) -> Result<()> {
+        if self.gas_base >= self.gas_used {
+            Ok(())
         } else {
-            Err(exception!(ExceptionCode::OutOfGas, self.gas_base - self.gas_remaining, "check_gas_remaining"))
+            Err(exception!(ExceptionCode::OutOfGas, self.remaining(), "check_gas_remaining"))
         }
     }
 
-    pub const fn limit(&self) -> i64 {
+    pub const fn limit(&self) -> u64 {
         self.gas_limit
     }
-    pub const fn credit(&self) -> i64 {
+    pub const fn credit(&self) -> u32 {
         self.gas_credit
     }
-    pub const fn price(&self) -> i64 {
+    pub const fn price(&self) -> u64 {
         self.gas_price
     }
     pub const fn remaining(&self) -> i64 {
-        self.gas_remaining
+        if self.gas_base >= self.gas_used {
+            (self.gas_base - self.gas_used) as i64
+        } else {
+            -((self.gas_used - self.gas_base) as i64)
+        }
     }
 
-    pub const fn used(&self) -> i64 {
-        self.gas_base - self.gas_remaining
+    pub const fn used(&self) -> u64 {
+        self.gas_used
     }
 
-    pub const fn vm_total_used(&self) -> i64 {
-        if self.gas_remaining > 0 {
-            self.gas_base - self.gas_remaining
+    pub const fn vm_total_used(&self) -> u64 {
+        if self.gas_base >= self.gas_used {
+            self.gas_used
         } else {
             self.gas_base
         }

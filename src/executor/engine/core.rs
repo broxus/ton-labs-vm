@@ -11,11 +11,11 @@
 * limitations under the License.
 */
 
-use std::{ops::Range, sync::{Arc, Mutex}};
+use std::sync::{Arc, Mutex};
 
-use everscale_types::cell::{CellSlice, LoadMode};
+use everscale_types::cell::{CellSliceRange, LoadMode};
 use everscale_types::dict::dict_get;
-use everscale_types::models::{GlobalCapabilities, GlobalCapability, LibDescr, ShardAccount, SimpleLib};
+use everscale_types::models::{GlobalCapabilities, GlobalCapability, LibDescr, SimpleLib};
 use everscale_types::prelude::{Cell, CellBuilder, CellFamily, Dict, HashBytes};
 use num_traits::FromPrimitive;
 
@@ -46,57 +46,20 @@ use crate::types::ResultOpt;
 
 pub(super) type ExecuteHandler = fn(&mut Engine) -> Status;
 
-pub trait IndexProvider: Send + Sync {
-    fn get_accounts_by_init_code_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
-    fn get_accounts_by_code_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
-    fn get_accounts_by_data_hash(&self, hash: &HashBytes) -> Result<Vec<ShardAccount>>;
-}
-
-pub(super) struct SliceProto {
-    data_window: Range<u16>,
-    references_window: Range<u8>,
-}
-
-impl Default for SliceProto {
-    fn default() -> Self {
-        Self {
-            data_window: 0..0,
-            references_window: 0..0,
-        }
-    }
-}
-
-impl SliceProto {
-    fn bits_offset(&self) -> u16 {
-        self.data_window.start
-    }
-}
-
-impl<'a> From<&CellSlice<'a>> for SliceProto {
-    fn from(slice: &CellSlice<'a>) -> Self {
-        Self {
-            data_window: slice.bits_offset() ..(slice.bits_offset() + slice.remaining_bits()),
-            references_window: slice.refs_offset() ..(slice.refs_offset() + slice.remaining_refs())
-        }
-    }
-}
-
 pub type TraceCallback = dyn Fn(&Engine, &EngineTraceInfo) + Send + Sync;
 
 pub struct Engine {
     pub(in crate::executor) cc: ContinuationData,
     pub(in crate::executor) cmd: InstructionExt,
     pub(in crate::executor) ctrls: SaveList,
-    pub(in crate::executor) index_provider: Option<Arc<dyn IndexProvider>>,
     pub(in crate::executor) modifiers: BehaviorModifiers,
     pub(in crate::executor) gas_consumer: GasConsumer,
     cstate: CommittedState,
-    time: u64,
     code_page: isize,
     debug_on: isize, // status of debug can be recursively incremented
     step: u32, // number of executable command
     debug_buffer: String,
-    cmd_code: SliceProto, // start of current cmd
+    cmd_code: CellSliceRange, // start of current cmd
     last_cmd: u8,
     trace: u8,
     trace_callback: Option<Arc<TraceCallback>>,
@@ -127,8 +90,8 @@ pub struct EngineTraceInfo<'a> {
     pub cmd_str: String,
     pub cmd_code: OwnedCellSlice, // start of current cmd
     pub stack: &'a Stack,
-    pub gas_used: i64,
-    pub gas_cmd: i64,
+    pub gas_used: u64,
+    pub gas_cmd: u64,
 }
 
 impl<'a> EngineTraceInfo<'a> {
@@ -174,6 +137,181 @@ impl CommittedState {
     }
 }
 
+pub struct VmBuilder {
+    capabilities: GlobalCapabilities,
+    vm: Engine,
+    smci: SmartContractInfo,
+    stack: Option<Stack>,
+}
+
+impl VmBuilder {
+
+    pub fn new(capabilities: GlobalCapabilities, smci: SmartContractInfo, gas: Gas) -> Self {
+        let trace = if cfg!(feature="fift_check") {
+            Engine::TRACE_ALL_BUT_CTRLS
+        } else if cfg!(feature="verbose") {
+            Engine::TRACE_ALL
+        } else {
+            Engine::TRACE_NONE
+        };
+        let log_enabled = log::log_enabled!(target: "tvm", log::Level::Debug)
+            || log::log_enabled!(target: "tvm", log::Level::Trace)
+            || log::log_enabled!(target: "tvm", log::Level::Info)
+            || log::log_enabled!(target: "tvm", log::Level::Error)
+            || log::log_enabled!(target: "tvm", log::Level::Warn);
+        let trace_callback: Option<Arc<TraceCallback>> = if !log_enabled {
+            None
+        } else if cfg!(feature="fift_check") {
+            Some(Arc::new(Engine::fift_trace_callback))
+        } else if cfg!(feature="verbose") {
+            Some(Arc::new(Engine::default_trace_callback))
+        } else {
+            Some(Arc::new(Engine::simple_trace_callback))
+        };
+         let vm = Engine {
+            cc: ContinuationData::new_empty(),
+            cmd: InstructionExt::new("NOP"),
+            ctrls: SaveList::new(),
+            modifiers: BehaviorModifiers::default(),
+            gas_consumer: GasConsumer::new(capabilities, gas),
+            cstate: CommittedState::new_empty(),
+            code_page: 0,
+            debug_on: 1,
+            step: 0,
+            debug_buffer: String::new(),
+            cmd_code: CellSliceRange::default(),
+            last_cmd: 0,
+            trace,
+            trace_callback,
+            log_string: None,
+            flags: 0,
+            block_version: 0,
+            signature_id: 0,
+        };
+        Self {capabilities, vm, smci, stack: None}
+    }
+
+    /// Sets persistent data for contract in register c4
+    pub fn set_data(mut self, data: Cell) -> Result<Self> {
+        self.vm.ctrls.put(4, &mut StackItem::Cell(data))?;
+        Ok(self)
+    }
+
+    /// Sets initial stack for TVM
+    pub fn set_stack(mut self, stack: Stack) -> Self {
+        self.stack = Some(stack);
+        self
+    }
+
+    pub fn build ( self) -> Result<Engine> {
+        let VmBuilder{ capabilities, mut vm, smci, stack  } = self;
+        let mycode = OwnedCellSlice::new(smci.mycode.clone())?;
+        if let Some(stack) = stack {
+            vm.cc.stack = stack;
+        }
+        for index in SaveList::REGS {
+            if vm.ctrls.get(index).is_none() {
+                let mut item = match index {
+                    0 => {
+                        let cont = ContinuationType::Quit(ExceptionCode::NormalTermination as i32);
+                        StackItem::continuation(ContinuationData::with_type(cont))
+                    },
+                    1 => {
+                        let cont = ContinuationType::Quit(ExceptionCode::AlternativeTermination as i32);
+                        StackItem::continuation(ContinuationData::with_type(cont))
+                    }
+                    2 => if vm.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
+                        StackItem::continuation(ContinuationData::with_type(ContinuationType::ExcQuit))
+                    } else {
+                        continue
+                    }
+                    3 => StackItem::continuation(ContinuationData::with_code(mycode.clone())),
+                    4 => StackItem::cell(Cell::empty_cell()),
+                    5 => StackItem::cell(Cell::empty_cell()),
+                    6 | 7 => continue, // set later
+                    x => unreachable!("control register {x} does not exist")
+                };
+                let _ = vm.ctrls.put(index, &mut item);
+            }
+        }
+        _ = vm.ctrls.put(7, &mut smci.into_temp_data_item(capabilities));
+        vm.cmd_code = mycode.as_ref().range();
+        *vm.cc.code_mut() = mycode;
+        Self::validate_balance(vm)
+    }
+
+    fn validate_balance(vm: Engine) -> Result<Engine> {
+                    // account balance is duplicated in stack and in c7 - so check
+            let balance_in_smc = vm
+                .ctrl(7)
+                .unwrap()
+                .as_tuple()
+                .unwrap()[0]
+                .as_tuple()
+                .unwrap()[7]
+                .as_tuple()
+                .unwrap()[0]
+                .as_integer()
+                .unwrap();
+            let stack_depth = vm.cc().stack.depth();
+            let balance_in_stack = vm
+                .cc()
+                .stack
+                .get(stack_depth - 1)
+                .as_integer()
+                .unwrap();
+        if balance_in_smc != balance_in_stack {
+            fail!("account balance in stack does not match c7");
+        }
+        Ok(vm)
+    }
+
+    pub fn set_block_version(mut self, block_version: u32) -> Self{
+        self.vm.block_version = block_version;
+        self
+    }
+
+    pub fn set_signature_id(mut self, signature_id: i32) -> Self{
+        self.vm.signature_id = signature_id;
+        self
+    }
+
+    /// Sets trace flag to TVM for printing stack and commands
+    pub fn set_debug(self, enable: bool) -> Self {
+        if enable {
+            self.set_trace(Engine::TRACE_ALL)
+        } else {
+            self.set_trace(Engine::TRACE_NONE)
+        }
+    }
+
+    pub fn set_trace(mut self, trace_mask: u8) -> Self {
+        self.vm.trace = trace_mask;
+        self
+    }
+
+    pub fn set_trace_callback(mut self, callback: Option<Arc<TraceCallback>>) -> Self{
+        self.vm.trace_callback = callback;
+        self
+    }
+
+    pub fn modify_behavior(mut self, modifiers: Option<&BehaviorModifiers>) -> Self {
+        if let Some(modifiers) = modifiers {
+        self.vm.modifiers = modifiers.clone();
+        }
+        self
+    }
+
+    pub fn set_libraries(
+        mut self,
+        account_libs: &Dict<HashBytes, SimpleLib>,
+        shared_libs: &Dict<HashBytes, LibDescr>
+    ) -> Result<Self> {
+        self.vm.gas_consumer.set_libraries(account_libs, shared_libs)?;
+        Ok(self)
+}
+}
+
 lazy_static::lazy_static! {
     static ref HANDLERS_CP0: Handlers = Handlers::new_code_page_0();
 }
@@ -191,60 +329,6 @@ impl Engine {
     pub (crate) const FLAG_COPYLEFTED: u64 = 0x01;
 
     // External API ***********************************************************
-
-    pub fn with_capabilities(capabilities: GlobalCapabilities) -> Engine {
-        let trace = if cfg!(feature="fift_check") {
-            Engine::TRACE_ALL_BUT_CTRLS
-        } else if cfg!(feature="verbose") {
-            Engine::TRACE_ALL
-        } else {
-            Engine::TRACE_NONE
-        };
-        let log_enabled = log::log_enabled!(target: "tvm", log::Level::Debug)
-            || log::log_enabled!(target: "tvm", log::Level::Trace)
-            || log::log_enabled!(target: "tvm", log::Level::Info)
-            || log::log_enabled!(target: "tvm", log::Level::Error)
-            || log::log_enabled!(target: "tvm", log::Level::Warn);
-        let trace_callback: Option<Arc<TraceCallback>> = if !log_enabled {
-            None
-        } else if cfg!(feature="fift_check") {
-            Some(Arc::new(Self::fift_trace_callback))
-        } else if cfg!(feature="verbose") {
-            Some(Arc::new(Self::default_trace_callback))
-        } else {
-            Some(Arc::new(Self::simple_trace_callback))
-        };
-        Engine {
-            cc: ContinuationData::new_empty(),
-            cmd: InstructionExt::new("NOP"),
-            ctrls: SaveList::new(),
-            index_provider: None,
-            modifiers: BehaviorModifiers::default(),
-            gas_consumer: GasConsumer::new(capabilities),
-            cstate: CommittedState::new_empty(),
-            time: 0,
-            code_page: 0,
-            debug_on: 1,
-            step: 0,
-            debug_buffer: String::new(),
-            cmd_code: SliceProto::default(),
-            last_cmd: 0,
-            trace,
-            trace_callback,
-            log_string: None,
-            flags: 0,
-            block_version: 0,
-            signature_id: 0,
-        }
-    }
-
-    pub fn set_block_version(&mut self, block_version: u32) {
-        self.block_version = block_version
-    }
-
-    pub fn set_signature_id(&mut self, signature_id: i32) {
-        self.signature_id = signature_id;
-    }
 
     pub fn assert_ctrl(&self, ctrl: usize, item: &StackItem) -> &Engine {
         match self.ctrls.get(ctrl) {
@@ -292,10 +376,6 @@ impl Engine {
         &self.cc.stack
     }
 
-    pub fn withdraw_stack(&mut self) -> Stack {
-        std::mem::replace(&mut self.cc.stack, Stack::new())
-    }
-
     pub fn get_stack_result_fift(&self) -> String {
         self.cc.stack.iter().map(|item| item.dump_as_fift()).collect::<Vec<_>>().join(" ")
     }
@@ -316,7 +396,7 @@ impl Engine {
         self.trace_callback.is_some()
     }
 
-    fn trace_info(&self, info_type: EngineTraceInfoType, gas: i64, log_string: Option<String>) {
+    fn trace_info(&self, info_type: EngineTraceInfoType, gas: u64, log_string: Option<String>) {
         if let Some(trace_callback) = self.trace_callback.as_ref() {
             // bigint param has been withdrawn during execution, so take it from the stack
             let cmd_str = if self.cmd.biginteger_raw().is_some() {
@@ -514,7 +594,7 @@ impl Engine {
                 break result
             }
             let gas = self.gas_consumer.gas().used();
-            self.cmd_code = SliceProto::from(self.cc.code().as_ref());
+            self.cmd_code = self.cc.code().as_ref().range();
             let execution_result = match HANDLERS_CP0.get_handler(self) {
                 Err(err) => {
                     self.basic_use_gas(8);
@@ -801,83 +881,12 @@ impl Engine {
         )
     }
 
-    // TODO: check if it should be in SmartContractInfo
-    pub fn set_local_time(&mut self, time: u64) {
-        self.time = time
-    }
-
-    pub fn set_trace(&mut self, trace_mask: u8) {
-        self.trace = trace_mask
-    }
-
-    pub fn set_trace_callback(&mut self, callback: impl Fn(&Engine, &EngineTraceInfo) + Send + Sync + 'static) {
-        self.trace_callback = Some(Arc::new(callback));
-    }
-
-    pub fn set_arc_trace_callback(&mut self, callback: Arc<TraceCallback>) {
-        self.trace_callback = Some(callback);
-    }
-
     pub fn trace_bit(&self, trace_mask: u8) -> bool {
         (self.trace & trace_mask) == trace_mask
     }
 
-    pub fn set_index_provider(&mut self, index_provider: Arc<dyn IndexProvider>) {
-        self.index_provider = Some(index_provider)
-    }
-
     pub fn behavior_modifiers(&self) -> &BehaviorModifiers {
         &self.modifiers
-    }
-
-    pub fn modify_behavior(&mut self, modifiers: &BehaviorModifiers) {
-        self.modifiers = modifiers.clone();
-    }
-
-    pub fn set_libraries(
-        &mut self,
-        account_libs: &Dict<HashBytes, SimpleLib>,
-        shared_libs: &Dict<HashBytes, LibDescr>
-    ) -> Result<()> {
-        Ok(self.gas_consumer.set_libraries(account_libs, shared_libs)?)
-    }
-
-    pub fn setup(
-        mut self,
-        code: OwnedCellSlice,
-        mut ctrls: Option<SaveList>,
-        stack: Option<Stack>,
-        gas: Gas,
-    ) -> Result<Self> {
-        *self.cc.code_mut() = code.clone();
-        self.cmd_code = SliceProto::from(self.cc.code().as_ref());
-        if let Some(stack) = stack {
-            self.cc.stack = stack;
-        }
-        *self.gas_consumer.gas_mut() = gas;
-        let cont = ContinuationType::Quit(ExceptionCode::NormalTermination as i32);
-        self.ctrls.put(0, &mut StackItem::continuation(ContinuationData::with_type(cont)))?;
-        let cont = ContinuationType::Quit(ExceptionCode::AlternativeTermination as i32);
-        self.ctrls.put(1, &mut StackItem::continuation(ContinuationData::with_type(cont)))?;
-        if self.has_capability(GlobalCapability::CapsTvmBugfixes2022) {
-            self.ctrls.put(2, &mut StackItem::continuation(ContinuationData::with_type(ContinuationType::ExcQuit)))?;
-        }
-        self.ctrls.put(3, &mut StackItem::continuation(ContinuationData::with_code(code.clone())))?;
-        self.ctrls.put(4, &mut StackItem::cell(Cell::empty_cell()))?;
-        self.ctrls.put(5, &mut StackItem::cell(Cell::empty_cell()))?;
-        self.ctrls.put(7, &mut SmartContractInfo::old_default(code.into_cell()?).into_temp_data_item())?;
-        if let Some(ref mut ctrls) = ctrls {
-            self.ctrls.apply(ctrls);
-        }
-        Ok(self)
-    }
-
-    // Internal API ***********************************************************
-
-    #[allow(dead_code)]
-    pub(in crate::executor) fn local_time(&mut self) -> u64 {
-        self.time += 1;
-        self.time
     }
 
     // Implementation *********************************************************
@@ -964,10 +973,10 @@ impl Engine {
         Ok(slice)
     }
 
-    fn basic_use_gas(&mut self, mut bits: usize) -> i64 {
+    fn basic_use_gas(&mut self, mut bits: usize) {
         let higher = self.cc.code().as_ref().bits_offset();
         bits += higher.saturating_sub(self.cmd_code.bits_offset()) as usize;
-        self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(bits, 0))
+        self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(bits, 0));
     }
 
     fn extract_instruction(&mut self) -> Status {
@@ -1409,12 +1418,7 @@ impl Engine {
         }
     }
     fn cmd_code(&self) -> Result<OwnedCellSlice> {
-        let mut code = OwnedCellSlice::new(self.cc.code().cell().clone())?;
-        let data = &self.cmd_code.data_window;
-        let refs = &self.cmd_code.references_window;
-        code.as_mut().advance(data.start, refs.start)?;
-        code.as_mut().shrink(Some(data.end - data.start), Some(refs.end - refs.start))?;
-        Ok(code)
+        Ok(OwnedCellSlice::try_from((self.cc.code().cell().clone(), self.cmd_code))?)
     }
 
     /// Set code page for interpret bytecode. now only code page 0 is supported

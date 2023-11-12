@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use everscale_types::cell::{Cell, CellFamily, HashBytes};
+use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{CurrencyCollection, GlobalCapabilities, GlobalCapability};
 use crate::stack::{
     StackItem,
@@ -40,7 +40,6 @@ pub struct SmartContractInfo {
     pub unix_time: u32,
     pub block_lt: u64,
     pub trans_lt: u64,
-    pub seq_no: u32,
     pub rand_seed: IntegerData,
     pub balance: CurrencyCollection,
     pub myself: OwnedCellSlice,
@@ -48,107 +47,17 @@ pub struct SmartContractInfo {
     pub mycode: Cell,
     pub init_code_hash: HashBytes,
     pub storage_fee_collected: u128,
-    pub capabilities: GlobalCapabilities,
-}
-
-impl Default for SmartContractInfo {
-    fn default() -> Self {
-        Self {
-            actions: 0,
-            msgs_sent: 0,
-            unix_time: 0,
-            block_lt: 0,
-            trans_lt: 0,
-            seq_no: 0,
-            rand_seed: Default::default(),
-            balance: Default::default(),
-            myself: OwnedCellSlice::empty(),
-            config_params: None,
-            mycode: Cell::empty_cell(),
-            init_code_hash: Default::default(),
-            storage_fee_collected: 0,
-            capabilities: GlobalCapabilities::new(0),
-        }
-    }
 }
 
 impl SmartContractInfo{
-    pub fn with_myself(myself: OwnedCellSlice) -> Self {
-        Self {
-            myself,
-            ..Self::default()
-        }
-    }
-
-    // for compatibility with old
-    pub fn old_default(mycode: Cell) -> Self {
-        Self {
-            capabilities: GlobalCapabilities::new(
-                (GlobalCapability::CapInitCodeHash | GlobalCapability::CapMyCode).into()
-            ),
-            mycode,
-            ..Default::default()
-        }
-    }
-
-    #[deprecated]
-    pub fn set_actions(&mut self, actions: u16) {
-        self.actions = actions;
-    }
-
-    #[deprecated]
-    pub fn set_msgs_sent(&mut self, msgs_sent: u16) {
-        self.msgs_sent = msgs_sent;
-    }
-
-    #[deprecated]
-    pub fn block_lt(&self) -> u64 {
-        self.block_lt
-    }
-
-    #[deprecated]
-    pub fn block_lt_mut(&mut self) -> &mut u64 {
-        &mut self.block_lt
-    }
-
-    pub fn unix_time(&self) -> u32 {
-        self.unix_time
-    }
-
-    #[deprecated]
-    pub fn unix_time_mut(&mut self) -> &mut u32 {
-        &mut self.unix_time
-    }
-
-    #[deprecated]
-    pub fn trans_lt(&self) -> u64 {
-        self.trans_lt
-    }
-
-    #[deprecated]
-    pub fn trans_lt_mut(&mut self) -> &mut u64 {
-        &mut self.trans_lt
-    }
-
-    #[deprecated]
-    pub fn set_config_params(&mut self, params: Cell) {
-        self.config_params = Some(params);
-    }
-
-    pub fn set_mycode(&mut self, code: Cell) {
-        self.mycode = code;
-    }
-
-    /*
-            The rand_seed field here is initialized deterministically starting from the
-        rand_seed of the block, and the account address.
-    */
-    pub fn calc_rand_seed(&mut self, rand_seed_block: HashBytes, account_address_anycast: &[u8]) {
+    /// The rand_seed field here is initialized deterministically starting from the
+    /// rand_seed of the block, and the (addr_std) account address.
+    pub fn calc_rand_seed(rand_seed_block: &HashBytes, account_id: &HashBytes) -> IntegerData {
         // combine all parameters to vec and calculate hash of them
-        self.rand_seed = if rand_seed_block != HashBytes::ZERO {
+        if rand_seed_block != &HashBytes::ZERO {
             let mut hasher = Sha256::new();
             hasher.update(rand_seed_block.0);
-            hasher.update(account_address_anycast);
+            hasher.update(account_id.0);
 
             let sha256 = hasher.finalize();
             IntegerData::from_unsigned_bytes_be(sha256)
@@ -156,18 +65,10 @@ impl SmartContractInfo{
             // if the user forgot to set the rand_seed_block value, then this 0 will be clearly visible on tests
             log::warn!(target: "tvm", "Not set rand_seed_block");
             IntegerData::zero()
-        };
+        }
     }
 
-    pub fn set_init_code_hash(&mut self, init_code_hash: HashBytes) {
-        self.init_code_hash = init_code_hash;
-    }
-
-    pub fn set_storage_fee(&mut self, storage_fee: u128) {
-        self.storage_fee_collected = storage_fee;
-    }
-
-    pub fn into_temp_data_item(self) -> StackItem {
+    pub fn into_temp_data_item(self, capabilities: GlobalCapabilities) -> StackItem {
         let mut params = vec![
             int!(0x076ef1ea),      // magic - should be changed because of structure change
             int!(self.actions),    // actions
@@ -183,15 +84,14 @@ impl SmartContractInfo{
             StackItem::Slice(self.myself),
             self.config_params.map_or(StackItem::None, StackItem::Cell),
         ];
-        let mut additional_params = vec![
+        let additional_params = [
             (GlobalCapability::CapMyCode, StackItem::cell(self.mycode.clone())),
             (GlobalCapability::CapInitCodeHash, StackItem::int(IntegerData::from_unsigned_bytes_be(self.init_code_hash.as_slice()))),
             (GlobalCapability::CapStorageFeeToTvm, StackItem::int(self.storage_fee_collected)),
-            (GlobalCapability::CapDelections, StackItem::int(self.seq_no)),
         ];
         let add_params = &mut Vec::new();
-        for (i, (caps, f)) in additional_params.drain(..).enumerate() {
-            if self.capabilities.contains(caps) {
+        for (i, (caps, f)) in additional_params.into_iter().enumerate() {
+            if capabilities.contains(caps) {
                 for _ in add_params.len()..i {
                     add_params.push(StackItem::default());
                 }
@@ -199,27 +99,8 @@ impl SmartContractInfo{
             }
         }
         params.append(add_params);
-        debug_assert!(params.len() <= 14, "{:?} caps: {:X}", params, self.capabilities.into_inner());
+        debug_assert!(params.len() <= 14, "{:?} caps: {:X}", params, capabilities.into_inner());
         StackItem::tuple(vec![StackItem::tuple(params)])
     }
 
-    #[deprecated]
-    pub fn into_temp_data_with_init_code_hash(mut self, is_init_code_hash: bool, with_mycode: bool) -> StackItem {
-        if is_init_code_hash { self.capabilities |= GlobalCapability::CapInitCodeHash }
-        if with_mycode { self.capabilities |= GlobalCapability::CapMyCode}
-        self.into_temp_data_item()
-    }
-
-    #[deprecated]
-    pub fn into_temp_data(mut self) -> StackItem {
-        self.capabilities |= (GlobalCapability::CapInitCodeHash | GlobalCapability::CapMyCode).into_inner();
-        self.into_temp_data_item()
-    }
-
-    #[deprecated]
-    pub fn into_temp_data_with_capabilities(mut self, capabilities: u64) -> StackItem {
-        self.capabilities = GlobalCapabilities::new(capabilities);
-        self.into_temp_data_item()
-
-    }
 }

@@ -55,9 +55,8 @@ pub(super) fn execute_hashcu(engine: &mut Engine) -> Status {
 pub(super) fn execute_hashsu(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("HASHSU"))?;
     fetch_stack(engine, 1)?;
-    let mut builder = CellBuilder::new();
-    builder.store_slice(engine.cmd.var(0).as_slice()?.as_ref())?;
-    let cell = engine.gas_consumer.ctx(|c| builder.build_ext(c))?;
+    let slice = engine.cmd.var(0).as_slice()?.as_ref();
+    let cell = engine.gas_consumer.ctx(|c| CellBuilder::build_from_ext(slice, c))?;
     let hash_int = hash_to_uint(cell.repr_hash().as_ref());
     engine.cc.stack.push(StackItem::integer(hash_int));
     Ok(())

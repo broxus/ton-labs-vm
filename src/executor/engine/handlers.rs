@@ -15,7 +15,6 @@ use crate::{
     error::TvmError,
     executor::{
         engine::{Engine, core::ExecuteHandler, storage::fetch_stack},
-        accounts::*,
         blockchain::*, config::*, continuation::*, crypto::*, currency::*, deserialization::*,
         dictionary::*, dump::*, exceptions::*, gas::*, globals::*, math::*, null::*,
         rand::*, serialization::*, slice_comparison::*, stack::*, tuple::*,
@@ -854,7 +853,6 @@ impl Handlers {
                 .set(0x2A, execute_my_code)
                 .set(0x2B, execute_init_code_hash)
                 .set(0x2C, execute_storage_fees_collected)
-                .set(0x2D, execute_seq_no)
                 .set(0x30, execute_config_dict)
                 .set(0x32, execute_config_ref_param)
                 .set(0x33, execute_config_opt_param)
@@ -880,10 +878,6 @@ impl Handlers {
             .set(0x41, execute_cdatasize)
             .set(0x42, execute_sdatasizeq)
             .set(0x43, execute_sdatasize)
-            .set(0x44, execute_find_by_init_code_hash)
-            .set(0x45, execute_find_by_code_hash)
-            .set(0x46, execute_find_by_data_hash)
-            // .set(0x50, execute_try_elect)
         )
     }
     /// Dumping functions

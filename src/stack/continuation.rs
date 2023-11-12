@@ -332,7 +332,7 @@ impl ContinuationData {
 }
 
 impl ContinuationData {
-    pub fn serialize_old(&self) -> Result<(CellBuilder, i64)> {
+    pub fn serialize_old(&self) -> Result<(CellBuilder, u64)> {
         let mut gas = 0;
         let mut builder = CellBuilder::new();
         match &self.type_of {
@@ -406,7 +406,7 @@ impl ContinuationData {
         Ok((builder, gas))
     }
 
-    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(Self, i64)> {
+    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(Self, u64)> {
         let mut gas = 0;
         let cont_type = match slice.load_small_uint(2)? {
             0 => Ok(ContinuationType::Ordinary),

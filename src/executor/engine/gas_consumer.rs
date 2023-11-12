@@ -97,12 +97,12 @@ impl<'a> InstrumentedCellContext<'a> {
 }
 
 impl GasConsumer {
-    pub(super) fn new(capabilities: GlobalCapabilities) -> Self {
+    pub(super) fn new(capabilities: GlobalCapabilities, gas: Gas) -> Self {
         Self {
             libraries: Vec::new(),
             visited_cells: HashSet::default(),
             visited_exotic_cells: HashSet::default(),
-            gas: Gas::empty(),
+            gas,
             capabilities,
         }
     }
@@ -382,7 +382,7 @@ fn get_lib_unsafe() -> anyhow::Result<()> {
         visited_cells: Default::default(),
         visited_exotic_cells: Default::default(),
         capabilities: Default::default(),
-        gas: Gas::test(),
+        gas: Gas::new(1000000000, 0, 1000000000, 10),
     };
 
     // this is safe - libraries belong to `gas_consumer` from outer scope

@@ -66,30 +66,30 @@ impl IntegerData {
 
     /// Constructs new (set to 0) value. This is just a wrapper for Self::zero().
     #[inline]
-    pub fn new() -> IntegerData {
+    pub fn new() -> Self {
         Self::zero()
     }
 
     /// Constructs new (set to 0) value.
     #[inline]
-    pub fn zero() -> IntegerData {
-        IntegerData {
+    pub fn zero() -> Self {
+        Self {
             value: IntegerValue::Value(Int::zero())
         }
     }
 
     /// Constructs new (set to 1) value.
     #[inline]
-    pub fn one() -> IntegerData {
-        IntegerData {
+    pub fn one() -> Self {
+        Self {
             value: IntegerValue::Value(Int::one())
         }
     }
 
     /// Constructs new (set to -1) value.
     #[inline]
-    pub fn minus_one() -> IntegerData {
-        IntegerData {
+    pub fn minus_one() -> Self {
+        Self {
             value: IntegerValue::Value(
                 Int::from_biguint(
                     num::bigint::Sign::Minus,
@@ -101,8 +101,8 @@ impl IntegerData {
 
     /// Constructs new Not-a-Number (NaN) value.
     #[inline]
-    pub fn nan() -> IntegerData {
-        IntegerData {
+    pub fn nan() -> Self {
+        Self {
             value: IntegerValue::NaN
         }
     }
@@ -117,13 +117,13 @@ impl IntegerData {
 
     /// Clears value (sets to 0).
     #[inline]
-    pub fn withdraw(&mut self) -> IntegerData {
+    pub fn withdraw(&mut self) -> Self {
         mem::replace(self, IntegerData::new())
     }
 
     /// Replaces value to a given one.
     #[inline]
-    pub fn replace(&mut self, new_value: IntegerData) {
+    pub fn replace(&mut self, new_value: Self) {
         *self = new_value;
     }
 

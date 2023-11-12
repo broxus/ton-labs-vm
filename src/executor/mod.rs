@@ -15,7 +15,6 @@
 mod microcode;
 #[macro_use]
 mod engine;
-mod accounts;
 mod blockchain;
 mod serialization;
 mod deserialization;

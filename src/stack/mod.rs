@@ -13,9 +13,9 @@
 
 use std::{cmp::Ordering, fmt, mem, ops::Range, slice::Iter, sync::Arc};
 
-use everscale_types::cell::{Cell, CellSlice, LoadMode, MAX_BIT_LEN, MAX_REF_COUNT, Store};
+use everscale_types::cell::{Cell, CellSlice, LoadMode, MAX_BIT_LEN, MAX_REF_COUNT};
 use everscale_types::dict::{RawDict};
-use everscale_types::prelude::{CellBuilder, CellFamily, CellType};
+use everscale_types::prelude::{CellBuilder, CellType};
 
 use crate::{Fmt, OwnedCellSlice, types::{ExceptionCode, Result}};
 use integer::serialization::{Encoding, SignedIntegerBigEndianEncoding};
@@ -694,7 +694,7 @@ impl StackItem {
             0x04 => StackItem::slice(slice_deserialize(slice)?),
             0x05 => {
                 let mut builder = CellBuilder::new();
-                slice.load_reference_cloned()?.store_into(&mut builder, &mut Cell::empty_context())?;
+                builder.store_reference(slice.load_reference_cloned()?)?;
                 StackItem::builder(builder)
             },
             0x06 => {
@@ -719,7 +719,7 @@ impl StackItem {
 }
 
 impl StackItem {
-    pub fn serialize_old(&self) -> Result<(CellBuilder, i64)> {
+    pub fn serialize_old(&self) -> Result<(CellBuilder, u64)> {
         let mut builder = CellBuilder::new();
         let mut gas = 0;
         match self {
@@ -776,7 +776,7 @@ impl StackItem {
         Ok((builder, gas))
     }
 
-    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(StackItem, i64)> {
+    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(StackItem, u64)> {
         let mut gas = 0;
         match slice.load_u8()? {
             0x00 => Ok((StackItem::None, gas)),
@@ -803,7 +803,7 @@ impl StackItem {
             },
             0x05 => {
                 let mut builder = CellBuilder::new();
-                slice.load_reference_cloned()?.store_into(&mut builder, &mut  Cell::empty_context())?;
+                builder.store_reference(slice.load_reference_cloned()?)?;
                 Ok((StackItem::builder(builder), gas))
             },
             0x06 => {

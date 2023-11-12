@@ -117,12 +117,6 @@ pub(super) fn execute_init_code_hash(engine: &mut Engine) -> Status {
 }
 
 // - integer
-pub(super) fn execute_seq_no(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapability::CapDelections)?;
-    extract_config(engine, "SEQNO")
-}
-
-// - integer
 pub(super) fn execute_storage_fees_collected(engine: &mut Engine) -> Status {
     engine.check_capability(GlobalCapability::CapStorageFeeToTvm)?;
     extract_config(engine, "STORAGEFEE")

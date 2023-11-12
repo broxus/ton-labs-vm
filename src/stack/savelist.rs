@@ -96,7 +96,7 @@ impl SaveList {
 }
 
 impl SaveList {
-    pub fn serialize_old(&self) -> Result<(CellBuilder, i64)> {
+    pub fn serialize_old(&self) -> Result<(CellBuilder, u64)> {
         let mut gas = 0;
         let mut dict = SaveListDict::new();
         for index in 0..Self::NUMREGS {
@@ -122,7 +122,7 @@ impl SaveList {
         }
         Ok((builder, gas))
     }
-    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(Self, i64)> {
+    pub fn deserialize_old(slice: &mut CellSlice) -> Result<(Self, u64)> {
         let mut gas = 0;
         match slice.load_bit()? {
             false => Ok((Self::new(), gas)),
