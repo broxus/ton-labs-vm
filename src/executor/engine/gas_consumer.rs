@@ -154,7 +154,7 @@ impl GasConsumer {
     ) -> Result<bool> {
         if cell_type == CellType::Ordinary {
             if opt.use_gas() {
-                if self.visited_cells.contains(&cell_hash.0) {
+                if self.visited_cells.contains(cell_hash) {
                     self.gas.try_use_gas(Gas::load_cell_price(false))?;
                 } else {
                     self.gas.try_use_gas(Gas::load_cell_price(true))?;
@@ -164,7 +164,7 @@ impl GasConsumer {
             Ok(true)
         } else if !opt.resolve() {
             Ok(true)
-        } else if self.visited_exotic_cells.contains(&cell_hash.0) {
+        } else if self.visited_exotic_cells.contains(cell_hash) {
             if opt.use_gas() {
                 self.gas.try_use_gas(Gas::load_cell_price(false))?;
             }

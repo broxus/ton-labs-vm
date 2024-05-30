@@ -16,7 +16,7 @@ rand = "0.8"
 sha2 = "0.9"
 thiserror = "1.0.26"
 
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"] }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"], branch = "feature/msgs-proc-logic" }
 everscale-crypto = "0.2"
 
 [features]

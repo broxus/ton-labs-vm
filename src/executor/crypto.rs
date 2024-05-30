@@ -44,7 +44,7 @@ fn hash_to_uint(bits: impl AsRef<[u8]>) -> IntegerData {
 pub(super) fn execute_hashcu(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("HASHCU"))?;
     fetch_stack(engine, 1)?;
-    let hash_int = hash_to_uint(engine.cmd.var(0).as_cell()?.repr_hash().as_ref());
+    let hash_int = hash_to_uint(engine.cmd.var(0).as_cell()?.repr_hash());
     engine.cc.stack.push(StackItem::integer(hash_int));
     Ok(())
 }
@@ -57,7 +57,7 @@ pub(super) fn execute_hashsu(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let slice = engine.cmd.var(0).as_slice()?.as_ref();
     let cell = engine.gas_consumer.ctx(|c| CellBuilder::build_from_ext(slice, c))?;
-    let hash_int = hash_to_uint(cell.repr_hash().as_ref());
+    let hash_int = hash_to_uint(cell.repr_hash());
     engine.cc.stack.push(StackItem::integer(hash_int));
     Ok(())
 }
