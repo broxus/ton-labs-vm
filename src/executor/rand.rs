@@ -61,8 +61,8 @@ pub(crate) fn execute_rand(engine: &mut Engine) -> Status {
 pub(crate) fn execute_randu256(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("RANDU256"))?;
     let mut hasher = sha2::Sha512::new();
-    hasher.update(engine.rand()?
-        .as_builder::<UnsignedIntegerBigEndianEncoding>(256)?.raw_data());
+    hasher.update(&engine.rand()?
+        .as_builder::<UnsignedIntegerBigEndianEncoding>(256)?.raw_data()[..32]);
     let sha512 = hasher.finalize();
     engine.set_rand(UnsignedIntegerBigEndianEncoding::new(256)
         .deserialize(&sha512[..32]))?;
