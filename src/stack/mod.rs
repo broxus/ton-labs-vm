@@ -899,7 +899,7 @@ impl Stack {
     pub fn drop_top(&mut self, n: usize) {
         let depth = self.depth();
         if depth < n {
-            log::error!(
+            tracing::error!(
                  target: "tvm",
                  "Corrupted stack state. This method can only be called \
                   when stack state is well known."

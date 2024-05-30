@@ -134,9 +134,9 @@ fn put_to_list(engine: &mut Engine, x: &mut Info, y: &mut StackItem) -> Result<O
 
 fn put_to_list_from_item(engine: &mut Engine, x: &mut Info, y: &Info) -> Result<Option<StackItem>> {
     if !SaveList::can_put(x.index, y.item(engine)?) {
-        if log::log_enabled!(log::Level::Error) {
+        if tracing::enabled!(tracing::Level::ERROR) {
             let value = x.list(engine)?.get(x.index).cloned().unwrap_or_else(StackItem::default);
-            log::error!(
+            tracing::error!(
                 target: "tvm",
                 "Cannot set: {} to list with index: {} and value: {}",
                 y.item(engine)?.clone(), x.index, value
@@ -158,10 +158,10 @@ fn put_to_list_from_list(engine: &mut Engine, x: &mut Info, y: &mut Info) -> Res
             }
         }
     }
-    if log::log_enabled!(log::Level::Error) {
+    if tracing::enabled!(tracing::Level::ERROR) {
         let old = x.list(engine)?.get(x.index).cloned().unwrap_or_else(StackItem::default);
         let new = y.list(engine)?.get(y.index).cloned().unwrap_or_else(StackItem::default);
-        log::error!(
+        tracing::error!(
             target: "tvm",
             "Cannot set: {} to list with index: {} and value: {}",
             new, x.index, old

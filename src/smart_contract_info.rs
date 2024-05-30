@@ -63,7 +63,7 @@ impl SmartContractInfo{
             IntegerData::from_unsigned_bytes_be(sha256)
         } else {
             // if the user forgot to set the rand_seed_block value, then this 0 will be clearly visible on tests
-            log::warn!(target: "tvm", "Not set rand_seed_block");
+            tracing::warn!(target: "tvm", "Not set rand_seed_block");
             IntegerData::zero()
         }
     }

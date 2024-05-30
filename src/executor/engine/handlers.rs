@@ -51,7 +51,7 @@ fn execute_setcpx(engine: &mut Engine) -> Status {
 
 fn execute_unknown(engine: &mut Engine) -> Status {
     let code = engine.last_cmd();
-    log::trace!(target: "tvm", "Invalid code: {} ({:#X})\n", code, code);
+    tracing::trace!(target: "tvm", "Invalid code: {} ({:#X})\n", code, code);
     err!(ExceptionCode::InvalidOpcode)
 }
 

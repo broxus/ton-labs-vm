@@ -154,11 +154,11 @@ impl VmBuilder {
         } else {
             Engine::TRACE_NONE
         };
-        let log_enabled = log::log_enabled!(target: "tvm", log::Level::Debug)
-            || log::log_enabled!(target: "tvm", log::Level::Trace)
-            || log::log_enabled!(target: "tvm", log::Level::Info)
-            || log::log_enabled!(target: "tvm", log::Level::Error)
-            || log::log_enabled!(target: "tvm", log::Level::Warn);
+        let log_enabled = tracing::enabled!(target: "tvm", tracing::Level::DEBUG)
+            || tracing::enabled!(target: "tvm", tracing::Level::TRACE)
+            || tracing::enabled!(target: "tvm", tracing::Level::INFO)
+            || tracing::enabled!(target: "tvm", tracing::Level::ERROR)
+            || tracing::enabled!(target: "tvm", tracing::Level::WARN);
         let trace_callback: Option<Arc<TraceCallback>> = if !log_enabled {
             None
         } else if cfg!(feature="fift_check") {
@@ -424,7 +424,7 @@ impl Engine {
 
     fn default_trace_callback(&self, info: &EngineTraceInfo) {
         if self.trace_bit(Engine::TRACE_CODE) && info.has_cmd() {
-            log::trace!(
+            tracing::trace!(
                 target: "tvm",
                 "{}: {}\n{}\n",
                 info.step,
@@ -433,7 +433,7 @@ impl Engine {
             );
         }
         if self.trace_bit(Engine::TRACE_GAS) {
-            log::trace!(
+            tracing::trace!(
                 target: "tvm",
                 "Gas: {} ({})\n",
                 info.gas_used,
@@ -441,55 +441,55 @@ impl Engine {
             );
         }
         if self.trace_bit(Engine::TRACE_STACK) {
-            log::trace!(target: "tvm", "{}", self.dump_stack("Stack trace", false));
+            tracing::trace!(target: "tvm", "{}", self.dump_stack("Stack trace", false));
         }
         if self.trace_bit(Engine::TRACE_CTRLS) {
-            log::trace!(target: "tvm", "{}", self.dump_ctrls(true));
+            tracing::trace!(target: "tvm", "{}", self.dump_ctrls(true));
         }
         if info.info_type == EngineTraceInfoType::Dump {
-            log::info!(target: "tvm", "{}", info.cmd_str);
+            tracing::info!(target: "tvm", "{}", info.cmd_str);
         }
     }
 
     #[allow(dead_code)]
     fn fift_trace_callback(&self, info: &EngineTraceInfo) {
         if info.info_type == EngineTraceInfoType::Dump {
-            log::info!(target: "tvm", "{}", info.cmd_str);
+            tracing::info!(target: "tvm", "{}", info.cmd_str);
         } else if info.info_type == EngineTraceInfoType::Start {
             if self.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", self.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", self.dump_ctrls(true));
             }
             if self.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
+                tracing::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
             }
             if self.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         } else if info.info_type == EngineTraceInfoType::Exception {
             if self.trace_bit(Engine::TRACE_CODE) {
-                log::info!(target: "tvm", "BAD_CODE: {}\n", info.cmd_str);
+                tracing::info!(target: "tvm", "BAD_CODE: {}\n", info.cmd_str);
             }
             if self.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
+                tracing::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
             }
             if self.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", self.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", self.dump_ctrls(true));
             }
             if self.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         } else if info.has_cmd() {
             if self.trace_bit(Engine::TRACE_CODE) {
-                log::info!(target: "tvm", "execute {}\n", info.cmd_str);
+                tracing::info!(target: "tvm", "execute {}\n", info.cmd_str);
             }
             if self.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
+                tracing::info!(target: "tvm", " [ {} ] \n", self.get_stack_result_fift());
             }
             if self.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", self.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", self.dump_ctrls(true));
             }
             if self.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         }
     }
@@ -547,42 +547,42 @@ impl Engine {
     #[allow(dead_code)]
     pub fn simple_trace_callback(enine: &Engine, info: &EngineTraceInfo) {
         if info.info_type == EngineTraceInfoType::Dump {
-            log::info!(target: "tvm", "{}", info.cmd_str);
+            tracing::info!(target: "tvm", "{}", info.cmd_str);
         } else if info.info_type == EngineTraceInfoType::Start {
             if enine.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
             }
             if enine.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
+                tracing::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
             }
             if enine.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         } else if info.info_type == EngineTraceInfoType::Exception {
             if enine.trace_bit(Engine::TRACE_CODE) {
-                log::info!(target: "tvm", "{} ({}) BAD_CODE: {}\n", info.step, info.gas_cmd, info.cmd_str);
+                tracing::info!(target: "tvm", "{} ({}) BAD_CODE: {}\n", info.step, info.gas_cmd, info.cmd_str);
             }
             if enine.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
+                tracing::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
             }
             if enine.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
             }
             if enine.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         } else if info.has_cmd() {
             if enine.trace_bit(Engine::TRACE_CODE) {
-                log::info!(target: "tvm", "{}\n", info.cmd_str);
+                tracing::info!(target: "tvm", "{}\n", info.cmd_str);
             }
             if enine.trace_bit(Engine::TRACE_STACK) {
-                log::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
+                tracing::info!(target: "tvm", " [ {} ] \n", Self::dump_stack_result(info.stack));
             }
             if enine.trace_bit(Engine::TRACE_CTRLS) {
-                log::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
+                tracing::trace!(target: "tvm", "{}", enine.dump_ctrls(true));
             }
             if enine.trace_bit(Engine::TRACE_GAS) {
-                log::info!(target: "tvm", "gas - {}\n", info.gas_used);
+                tracing::info!(target: "tvm", "gas - {}\n", info.gas_used);
             }
         }
     }
@@ -915,7 +915,7 @@ impl Engine {
         if self.debug_on > 0 {
             let buffer = std::mem::take(&mut self.debug_buffer);
             if self.trace_callback.is_none() {
-                log::info!(target: "tvm", "{}", buffer);
+                tracing::info!(target: "tvm", "{}", buffer);
             } else {
                 self.trace_info(EngineTraceInfoType::Dump, 0, Some(buffer));
             }
@@ -1287,7 +1287,7 @@ impl Engine {
         let exception = match tvm_exception_full(&err) {
             Some(exception) => exception,
             None => {
-                log::trace!(target: "tvm", "BAD CODE: {}\n", self.cmd_code_string());
+                tracing::trace!(target: "tvm", "BAD CODE: {}\n", self.cmd_code_string());
                 return Err(err)
             }
         };
@@ -1295,7 +1295,7 @@ impl Engine {
             self.step += 1;
         }
         if exception.exception_code() == Some(ExceptionCode::OutOfGas) {
-            log::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
+            tracing::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
             return Err(err)
         }
         if let Err(err) = self.gas_consumer.gas_mut().try_use_gas(Gas::exception_price()) {
@@ -1329,7 +1329,7 @@ impl Engine {
         let exception = match tvm_exception_full(&err) {
             Some(exception) => exception,
             None => {
-                log::trace!(target: "tvm", "BAD CODE: {}\n", self.cmd_code_string());
+                tracing::trace!(target: "tvm", "BAD CODE: {}\n", self.cmd_code_string());
                 return Err(err)
             }
         };
@@ -1337,7 +1337,7 @@ impl Engine {
             self.step += 1;
         }
         if exception.exception_code() == Some(ExceptionCode::OutOfGas) {
-            log::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
+            tracing::trace!(target: "tvm", "OUT OF GAS CODE: {}\n", self.cmd_code_string());
             return Err(err)
         }
         if let Err(err) = self.gas_consumer.gas_mut().try_use_gas(Gas::exception_price()) {

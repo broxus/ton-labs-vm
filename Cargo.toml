@@ -4,17 +4,17 @@ name = "ton_vm"
 version = "2.0.0"
 
 [dependencies]
-ahash = "0.8.3"
-anyhow = "1"
+ahash = "0.8"
+anyhow = "1.0"
 hex = "0.4"
 lazy_static = "1.4"
-log = "0.4.8"
 num = "0.4"
-num-derive = "0.3"
+num-derive = "0.4"
 num-traits = "0.2"
 rand = "0.8"
-sha2 = "0.9"
-thiserror = "1.0.26"
+sha2 = "0.10"
+thiserror = "1.0"
+tracing = "0.1"
 
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"], branch = "feature/msgs-proc-logic" }
 everscale-crypto = "0.2"
