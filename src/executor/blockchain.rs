@@ -44,9 +44,9 @@ fn get_bigint(slice: &CellSlice) -> Result<BigInt> {
     if bits == 0 {
         Ok(BigInt::from(0))
     } else if bits < 256 {
-        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0, 32], bits)?) << (256 - bits))
+        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0; 32], bits)?) << (256 - bits))
     } else {
-        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0, 32], 256)?))
+        Ok(BigInt::from_bytes_be(Sign::Plus, &slice.get_raw(0, &mut [0; 32], 256)?))
     }
 }
 
