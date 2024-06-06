@@ -16,7 +16,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 tracing = "0.1"
 
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"], branch = "feature/msgs-proc-logic" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"], branch = "tycho" }
 everscale-crypto = "0.2"
 
 [features]
