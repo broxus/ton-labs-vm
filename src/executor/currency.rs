@@ -84,7 +84,7 @@ fn store_var(engine: &mut Engine, name: &'static str, max_bits: usize, sign: boo
     };
     x.store_uint(bytes  as u64, len)?;
     x.store_raw(&vec, bytes * 8)?;
-    if b.has_capacity(x.bit_len(), x.references().len() as u8) {
+    if b.has_capacity(x.size_bits(), x.references().len() as u8) {
         let mut b = engine.cmd.var_mut(1).as_builder_mut()?;
         b.store_builder(&x).expect("free space was checked before");
         engine.cc.stack.push_builder(b);

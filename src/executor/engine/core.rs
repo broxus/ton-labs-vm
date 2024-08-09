@@ -19,6 +19,7 @@ use everscale_types::models::{GlobalCapabilities, GlobalCapability, LibDescr, Si
 use everscale_types::prelude::{Cell, CellBuilder, CellFamily, Dict, HashBytes};
 use num_traits::FromPrimitive;
 
+use crate::utils::CellSliceExt;
 use crate::{
     OwnedCellSlice,
     types::{ExceptionCode, Result},
@@ -525,12 +526,12 @@ impl Engine {
                 StackItem::Cell(data) => {
                     format!("C{}-{}", data.bit_len(), data.reference_count())
                 }
-                StackItem::Continuation(data) => format!("T{}", data.code().as_ref().remaining_bits() / 8),
+                StackItem::Continuation(data) => format!("T{}", data.code().as_ref().size_bits() / 8),
                 StackItem::Builder(data) => {
-                    format!("B{}-{}", data.bit_len(), data.references().len())
+                    format!("B{}-{}", data.size_bits(), data.references().len())
                 }
                 StackItem::Slice(data) => {
-                    format!("S{}-{}", data.as_ref().remaining_bits(), data.as_ref().remaining_refs())
+                    format!("S{}-{}", data.as_ref().size_bits(), data.as_ref().size_refs())
                 }
                 StackItem::Tuple(data) => match data.len() {
                     0 => "[]".to_string(),
@@ -770,7 +771,7 @@ impl Engine {
 
     // return Ok(Some(exit_code)) - if you want to stop execution
     pub(in crate::executor) fn seek_next_cmd(&mut self) -> Result<Option<i32>> {
-        while self.cc.code().as_ref().remaining_bits() == 0 {
+        while self.cc.code().as_ref().size_bits() == 0 {
             let gas = self.gas_consumer.gas().used();
             self.log_string = None;
             let result = if let Some(reference) = self.cc.code().as_ref().get_reference_cloned(0).ok() {
@@ -948,10 +949,10 @@ impl Engine {
 
         let mut code = self.cmd_code()?;
         let mut slice = code.clone();
-        if offset >= slice.as_ref().remaining_bits() {
+        if offset >= slice.as_ref().size_bits() {
             return err!(ExceptionCode::InvalidOpcode)
         }
-        slice.as_mut().advance(offset, 0)?;
+        slice.as_mut().skip_first(offset, 0)?;
         if r != 0 {
             refs += slice.as_mut().load_uint(r)? as u8;
         }
@@ -961,11 +962,11 @@ impl Engine {
         let mut shift = 8 * bytes + offset + r + x + 7;
         let remainder = shift % 8;
         shift -= remainder;
-        if (slice.as_ref().remaining_bits() < shift - r - x - offset)
-            || (slice.as_ref().remaining_refs() < refs) {
+        if (slice.as_ref().size_bits() < shift - r - x - offset)
+            || (slice.as_ref().size_refs() < refs) {
             return err!(ExceptionCode::InvalidOpcode)
         }
-        code.as_mut().advance(shift, refs)?;
+        code.as_mut().skip_first(shift, refs)?;
         *self.cc.code_mut() = code;
 
         slice.as_mut().shrink(Some(shift - r - x - offset), Some(refs))?;
@@ -974,8 +975,8 @@ impl Engine {
     }
 
     fn basic_use_gas(&mut self, mut bits: usize) {
-        let higher = self.cc.code().as_ref().bits_offset();
-        bits += higher.saturating_sub(self.cmd_code.bits_offset()) as usize;
+        let higher = self.cc.code().as_ref().offset_bits();
+        bits += higher.saturating_sub(self.cmd_code.offset_bits()) as usize;
         self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(bits, 0));
     }
 
@@ -1254,7 +1255,7 @@ impl Engine {
             Some(InstructionOptions::Dictionary(offset, bits)) => {
                 self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(offset + 1 + bits, 0));
                 let mut code = self.cmd_code()?;
-                code.as_mut().advance(offset as u16, 0)?;
+                code.as_mut().skip_first(offset as u16, 0)?;
                 // TODO: need to check this failure case
                 let slice = get_dictionary_opt(&mut code).ok().flatten().unwrap_or(OwnedCellSlice::empty());
                 self.cmd.params.push(InstructionParameter::Slice(slice));
@@ -1265,7 +1266,7 @@ impl Engine {
             Some(InstructionOptions::Bytestring(offset, r, x, bytes)) => {
                 self.gas_consumer.gas_mut().use_gas(Gas::basic_gas_price(offset + r + x, 0));
                 let slice = self.extract_slice(offset, r, x, 0, bytes)?;
-                if slice.as_ref().remaining_bits() % 8 != 0 {
+                if slice.as_ref().size_bits() % 8 != 0 {
                     return err!(ExceptionCode::InvalidOpcode)
                 }
                 self.cmd.params.push(InstructionParameter::Slice(slice))
@@ -1382,14 +1383,14 @@ impl Engine {
     /// trim zeros from right to first one
     fn rtrim_slice(slice: &mut OwnedCellSlice) -> Result<()> {
         let s = slice.as_ref();
-        let mut remaining_bits = s.remaining_bits();
-        for offset in (0..remaining_bits).rev() {
+        let mut size_bits = s.size_bits();
+        for offset in (0..size_bits).rev() {
             if s.get_bit(offset).ok() == Some(true) {
-                remaining_bits = offset;
+                size_bits = offset;
                 break
             }
         }
-        slice.as_mut().shrink(Some(remaining_bits), None)?;
+        slice.as_mut().shrink(Some(size_bits), None)?;
         Ok(())
     }
 
@@ -1406,7 +1407,7 @@ impl Engine {
             Err(_) => err!(
                 ExceptionCode::InvalidOpcode,
                 "remaining bits expected >= 8, but actual value is: {}",
-                self.cc.code().as_ref().remaining_bits()
+                self.cc.code().as_ref().size_bits()
             )
         }
     }

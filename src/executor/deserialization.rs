@@ -16,6 +16,7 @@ use everscale_types::cell::LoadMode;
 use everscale_types::models::GlobalCapability;
 use everscale_types::prelude::{CellSlice, CellType, DynCell, HashBytes};
 
+use crate::utils::CellSliceExt;
 use crate::{OwnedCellSlice, types::{ExceptionCode, Result}};
 
 use crate::{
@@ -71,7 +72,7 @@ fn load_slice(engine: &mut Engine, name: &'static str, len: &mut usize, how: u8)
 fn proc_slice<F>(engine: &mut Engine, len: usize, how: u8, f: F) -> Status
 where F: FnOnce(&mut OwnedCellSlice, &mut GasConsumer) -> Result<StackItem> {
     let mut slice = engine.cmd.last_var()?.as_slice()?.clone();
-    if (slice.as_ref().remaining_bits() as usize) < len {
+    if (slice.as_ref().size_bits() as usize) < len {
         if how.bit(STAY) {
             engine.cc.stack.push(StackItem::Slice(slice));
         }
@@ -119,7 +120,7 @@ fn ld_slice(engine: &mut Engine, name: &'static str, mut len: usize, how: u8) ->
         |slice, _| {
             let mut new_slice = slice.clone();
             new_slice.as_mut().shrink(Some(len as u16), Some(0))?; // without references
-            slice.as_mut().advance(len as u16, 0)?;
+            slice.as_mut().skip_first(len as u16, 0)?;
             Ok(StackItem::Slice(new_slice))
         }
     )
@@ -339,12 +340,12 @@ pub fn execute_plduz(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let l = 32 * engine.cmd.length() as u16;
     let mut slice = engine.cmd.var(0).as_slice()?.clone();
-    let n = slice.as_ref().remaining_bits();
+    let n = slice.as_ref().size_bits();
     let mut data = slice.as_ref()
         .get_prefix(std::cmp::min(n, l), 0)
         .get_raw(0, &mut [0; 128], std::cmp::min(n, l))
         .map(Vec::from)?;
-    slice.as_mut().advance(std::cmp::min(n, l), 0)?;
+    slice.as_mut().skip_first(std::cmp::min(n, l), 0)?;
     if n < l {
         let r = l - n;
         data.extend_from_slice(&vec![0; r as usize / 8]);
@@ -374,8 +375,8 @@ fn sdbegins(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         return err!(ExceptionCode::FatalError)
     };
     let mut tested = engine.cmd.var(params - 1).as_slice()?.clone();
-    let len = prefix.as_ref().remaining_bits();
-    if len > tested.as_ref().remaining_bits() {
+    let len = prefix.as_ref().size_bits();
+    if len > tested.as_ref().size_bits() {
         if how.bit(QUIET) {
             engine.cc.stack.push(StackItem::Slice(tested));
             engine.cc.stack.push(boolean!(false));
@@ -386,7 +387,7 @@ fn sdbegins(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     }
     let result =  prefix.as_ref().strip_data_prefix(tested.as_ref()).is_none();
     if result {
-        tested.as_mut().advance(len, 0)?;
+        tested.as_mut().skip_first(len, 0)?;
     } else if !how.bit(QUIET) {
         return err!(ExceptionCode::CellUnderflow);
     }
@@ -447,29 +448,29 @@ fn sdcut(engine: &mut Engine, bits: u8, refs: u8) -> Status {
     };
     let l0: u16 = engine.cmd.var(i).as_integer()?.into(0..=1023)?;
     let mut slice = engine.cmd.var(i + 1).as_slice()?.clone();
-    let data_len = slice.as_ref().remaining_bits();
-    let refs_count = slice.as_ref().remaining_refs();
+    let data_len = slice.as_ref().size_bits();
+    let refs_count = slice.as_ref().size_refs();
     if (l0 + l1 > data_len) || (r0 + r1 > refs_count) {
         return err!(ExceptionCode::CellUnderflow);
     }
     match refs {
         DROP | UPTO => slice.as_mut().shrink(None, Some(r0))?,
-        FROM => slice.as_mut().advance(0, r0)?,
+        FROM => slice.as_mut().skip_first(0, r0)?,
         FROM_SIZE => {
-            slice.as_mut().advance(0, r0)?;
+            slice.as_mut().skip_first(0, r0)?;
             slice.as_mut().shrink(None, Some(r1))?;
         },
-        LAST => slice.as_mut().advance(0, refs_count - r0)?,
+        LAST => slice.as_mut().skip_first(0, refs_count - r0)?,
         NOT_LAST => slice.as_mut().shrink(None, Some(refs_count - r0))?,
         _ => ()
     };
     match bits {
-        FROM => slice.as_mut().advance(l0, 0)?,
+        FROM => slice.as_mut().skip_first(l0, 0)?,
         FROM_SIZE => {
-            slice.as_mut().advance(l0, 0)?;
+            slice.as_mut().skip_first(l0, 0)?;
             slice.as_mut().shrink(Some(l1), None)?;
         },
-        LAST => slice.as_mut().advance(data_len - l0, 0)?,
+        LAST => slice.as_mut().skip_first(data_len - l0, 0)?,
         NOT_LAST => slice.as_mut().shrink(Some(data_len - l0), None)?,
         UPTO => slice.as_mut().shrink(Some(l0), None)?,
         _ => ()
@@ -577,11 +578,11 @@ fn sbitrefs(engine: &mut Engine, name: &'static str, target: Target) -> Status {
     fetch_stack(engine, 1)?;
     let s = engine.cmd.var(0).as_slice()?.clone();
     if (target == Target::Bits) || (target == Target::BitRefs) {
-        let l = s.as_ref().remaining_bits();
+        let l = s.as_ref().size_bits();
         engine.cc.stack.push(int!(l));
     }
     if (target == Target::Refs) || (target == Target::BitRefs) {
-        let r = s.as_ref().remaining_refs();
+        let r = s.as_ref().size_refs();
         engine.cc.stack.push(int!(r));
     }
     Ok(())
@@ -595,8 +596,8 @@ fn schkbits(engine: &mut Engine, name: &'static str, limit: usize, quiet: bool) 
     let l = engine.cmd.var(0).as_integer()?.into(0..=limit)? as u16;
     let s = engine.cmd.var(1).as_slice()?;
     if quiet {
-        engine.cc.stack.push(boolean!(s.as_ref().remaining_bits() >= l));
-    } else if s.as_ref().remaining_bits() < l {
+        engine.cc.stack.push(boolean!(s.as_ref().size_bits() >= l));
+    } else if s.as_ref().size_bits() < l {
         return err!(ExceptionCode::CellUnderflow);
     }
     Ok(())
@@ -609,7 +610,7 @@ fn schkrefs(engine: &mut Engine, name: &'static str, quiet: bool) -> Status {
     fetch_stack(engine, 2)?;
     let r = engine.cmd.var(0).as_integer()?.into(0..=4)?;
     let s = engine.cmd.var(1).as_slice()?;
-    let refs_count = s.as_ref().remaining_refs();
+    let refs_count = s.as_ref().size_refs();
     if quiet {
         engine.cc.stack.push(boolean!(refs_count >= r));
     } else if refs_count < r {
@@ -626,8 +627,8 @@ fn schkbitrefs(engine: &mut Engine, name: &'static str, quiet: bool) -> Status {
     let r = engine.cmd.var(0).as_integer()?.into(0..=4)?;
     let l = engine.cmd.var(1).as_integer()?.into(0..=1023)?;
     let s = engine.cmd.var(2).as_slice()?;
-    let data_len = s.as_ref().remaining_bits();
-    let refs_count = s.as_ref().remaining_refs();
+    let data_len = s.as_ref().size_bits();
+    let refs_count = s.as_ref().size_refs();
     let status = l <= data_len && r <= refs_count;
     if quiet {
         engine.cc.stack.push(boolean!(status));
@@ -789,13 +790,13 @@ pub fn execute_pldule8q(engine: &mut Engine) -> Status {
 }
 
 fn trim_leading_bits(slice: &mut CellSlice, bit: u8) -> Result<u16> {
-    let n = slice.remaining_bits();
+    let n = slice.size_bits();
     let bit = Some(bit == 1);
     let mut skipped = 0;
     while skipped < n && slice.get_bit(skipped).ok() == bit {
         skipped += 1;
     }
-    slice.advance(skipped, 0)?;
+    slice.skip_first(skipped, 0)?;
     Ok(skipped)
 }
 
@@ -840,8 +841,8 @@ fn split(engine: &mut Engine, name: &'static str, quiet: bool) -> Status {
     let r = engine.cmd.var(0).as_integer()?.into(0..=4)?;
     let l = engine.cmd.var(1).as_integer()?.into(0..=1023)?;
     let mut slice = engine.cmd.var(2).as_slice()?.clone();
-    let data_len = slice.as_ref().remaining_bits();
-    let refs_count = slice.as_ref().remaining_refs();
+    let data_len = slice.as_ref().size_bits();
+    let refs_count = slice.as_ref().size_refs();
     if (l > data_len) || (r > refs_count) {
         if quiet {
             engine.cc.stack.push(StackItem::Slice(slice));
@@ -853,7 +854,7 @@ fn split(engine: &mut Engine, name: &'static str, quiet: bool) -> Status {
     }
     let mut slice1 = slice.clone();
     slice.as_mut().shrink(Some(l), Some(r))?;
-    slice1.as_mut().advance(l, r)?;
+    slice1.as_mut().skip_first(l, r)?;
     engine.cc.stack.push(StackItem::Slice(slice));
     engine.cc.stack.push(StackItem::Slice(slice1));
     if quiet {
@@ -893,9 +894,9 @@ fn datasize(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     {
         if let Ok(slice) = engine.cmd.var(1).as_slice() {
             let slice = slice.as_ref();
-            refs = slice.remaining_refs() as u64;
-            bits = slice.remaining_bits() as u64;
-            for i in 0..slice.remaining_refs() {
+            refs = slice.size_refs() as u64;
+            bits = slice.size_bits() as u64;
+            for i in 0..slice.size_refs() {
                 let cell = slice.get_reference(i)?;
                 refs = refs.saturating_add(cell.stats().cell_count);
                 bits = bits.saturating_add(cell.stats().bit_count);
@@ -924,8 +925,8 @@ fn datasize(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         let mut stack = Vec::new();
         if let Ok(slice) = engine.cmd.var(1).as_slice() {
             let slice = slice.as_ref();
-            bits = slice.remaining_bits() as u64;
-            refs = slice.remaining_refs() as u64;
+            bits = slice.size_bits() as u64;
+            refs = slice.size_refs() as u64;
             stack.push(slice.references());
         } else if let Ok(cell) = engine.cmd.var(1).as_cell() {
             let cell = use_gas(engine.block_version(), &mut engine.gas_consumer, cell.as_ref())?;

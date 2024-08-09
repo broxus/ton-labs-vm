@@ -53,18 +53,18 @@ fn size_b(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     match engine.cmd.var(0).as_builder()? {
         b if how.bit(INV) => {
             if how.bit(BITS) {
-                engine.cc.stack.push(int!(b.spare_bits_capacity()));
+                engine.cc.stack.push(int!(b.spare_capacity_bits()));
             }
             if how.bit(REFS) {
-                engine.cc.stack.push(int!(b.spare_refs_capacity()));
+                engine.cc.stack.push(int!(b.spare_capacity_refs()));
             }
         }
         b => {
             if how.bit(BITS) {
-                engine.cc.stack.push(int!(b.bit_len()));
+                engine.cc.stack.push(int!(b.size_bits()));
             }
             if how.bit(REFS) {
-                engine.cc.stack.push(int!(b.references().len()));
+                engine.cc.stack.push(int!(b.size_refs()));
             }
         }
     }
@@ -121,7 +121,7 @@ pub fn execute_endxc(engine: &mut Engine) -> Status {
     let special = engine.cmd.var(0).as_bool()?;
     let mut b = engine.cmd.var_mut(1).as_builder_mut()?;
     if special {
-        if b.bit_len() < 8 {
+        if b.size_bits() < 8 {
             engine.gas_consumer.gas_mut().use_gas(Gas::finalize_price());
             return err!(ExceptionCode::CellOverflow, "Not enough data for a special cell")
         }
@@ -150,7 +150,7 @@ fn store_data(engine: &mut Engine, var: usize, x: Result<CellBuilder>, quiet: bo
     let result = match x {
         Ok(x) => {
             let b = engine.cmd.var(var).as_builder()?;
-            if b.has_capacity(x.bit_len(), x.references().len() as u8) {
+            if b.has_capacity(x.size_bits(), x.size_refs()) {
                 let mut b = engine.cmd.var_mut(var).as_builder_mut()?;
                 b.store_builder(&x)?;
                 if finalize {
@@ -388,10 +388,10 @@ fn check_b(engine: &mut Engine, name: &'static str, how: u8) -> Status {
     let b = engine.cmd.var(params - 1).as_builder()?;
     let mut status = true;
     if how.bit(BITS) {
-        status &= b.spare_bits_capacity() as usize >= l
+        status &= b.spare_capacity_bits() as usize >= l
     }
     if how.bit(REFS) {
-        status &= b.spare_refs_capacity() >= r
+        status &= b.spare_capacity_refs() >= r
     }
     if how.bit(QUIET) {
         engine.cc.stack.push(boolean!(status));
@@ -711,7 +711,7 @@ pub fn execute_sdepth(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let mut depth = 0;
     let s = engine.cmd.var(0).as_slice()?;
-    let n = s.as_ref().remaining_refs();
+    let n = s.as_ref().size_refs();
     for i in 0..n {
         depth = std::cmp::max(depth, 1 + s.as_ref().get_reference(i)?.depth(LevelMask::MAX_LEVEL));
     }

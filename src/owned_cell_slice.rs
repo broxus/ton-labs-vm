@@ -110,9 +110,9 @@ impl OwnedCellSlice {
 
     pub fn into_cell(self) -> Result<Cell, Error> {
         let range = self.cell_slice.range();
-        if range.bits_offset() == 0 && range.refs_offset() == 0
-            && range.remaining_refs() == self.cell.reference_count()
-            && range.remaining_bits() == self.cell.bit_len() {
+        if range.offset_bits() == 0 && range.offset_refs() == 0
+            && range.size_refs() == self.cell.reference_count()
+            && range.size_bits() == self.cell.bit_len() {
             Ok(self.cell)
         } else {
             CellBuilder::build_from(&self.cell_slice)

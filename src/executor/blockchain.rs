@@ -21,6 +21,7 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::{Cell, CellFamily, Load, Store};
 use num::{BigInt, bigint::Sign};
 
+use crate::utils::CellSliceExt;
 use crate::{OwnedCellSlice, types::{Result, ExceptionCode}};
 
 use crate::{
@@ -40,7 +41,7 @@ use crate::{
 };
 
 fn get_bigint(slice: &CellSlice) -> Result<BigInt> {
-    let bits = slice.remaining_bits();
+    let bits = slice.size_bits();
     if bits == 0 {
         Ok(BigInt::from(0))
     } else if bits < 256 {
@@ -128,7 +129,7 @@ pub(super) fn execute_copyleft(engine: &mut Engine) -> Status {
     if !myaddr.is_masterchain() {
         let num = engine.cmd.var(0).as_integer()?.into(0..=255)?;
         let slice = engine.cmd.var(1).as_slice()?;
-        if slice.as_ref().remaining_bits() != 256 {
+        if slice.as_ref().size_bits() != 256 {
             return Err(ExceptionCode::TypeCheckError.into());
         }
         let action = OutAction::CopyLeft {
@@ -179,8 +180,8 @@ pub(super) fn execute_ldmsgaddr<T: OperationBehavior>(engine: &mut Engine) -> St
         let (bits_to_move, refs_to_move) = {
             let remainder = remainder.as_ref();
             let slice = slice.as_ref();
-            let bits_to_move = remainder.bits_offset() - slice.bits_offset();
-            let refs_to_move = remainder.refs_offset() - slice.refs_offset();
+            let bits_to_move = remainder.offset_bits() - slice.offset_bits();
+            let refs_to_move = remainder.offset_refs() - slice.offset_refs();
             (bits_to_move, refs_to_move)
         };
         slice.as_mut().shrink(Some(bits_to_move), Some(refs_to_move))?;
@@ -233,13 +234,13 @@ pub(super) fn execute_rewrite_std_addr<T: OperationBehavior>(engine: &mut Engine
     load_address::<_, T>(engine, if T::quiet() {"REWRITESTDADDRQ"} else {"REWRITESTDADDR"}, |tuple, _| {
         if tuple.len() == 4 {
             let addr = tuple[3].as_slice()?;
-            let mut y = match addr.as_ref().remaining_bits() {
+            let mut y = match addr.as_ref().size_bits() {
                 256 => IntegerData::from(get_bigint(addr.as_ref())?)?,
                 _ => return err!(ExceptionCode::CellUnderflow)
             };
             if tuple[1].is_slice() {
                 let rewrite_pfx = tuple[1].as_slice()?;
-                let bits = rewrite_pfx.as_ref().remaining_bits();
+                let bits = rewrite_pfx.as_ref().size_bits();
                 if bits > 256 {
                     return err!(ExceptionCode::CellUnderflow)
                 } else if bits > 0 {
@@ -262,13 +263,13 @@ pub(super) fn execute_rewrite_var_addr<T: OperationBehavior>(engine: &mut Engine
         if tuple.len() == 4 {
             let mut addr = tuple[3].as_slice()?.clone();
             if let Ok(rewrite_pfx) = tuple[1].as_slice() {
-                let pfx_bits = rewrite_pfx.as_ref().remaining_bits();
-                if pfx_bits > addr.as_ref().remaining_bits() {
+                let pfx_bits = rewrite_pfx.as_ref().size_bits();
+                if pfx_bits > addr.as_ref().size_bits() {
                     return err!(ExceptionCode::CellUnderflow)
                 } else if pfx_bits > 0 {
                     let mut b = CellBuilder::new();
                     b.store_slice_data(rewrite_pfx.as_ref())?;
-                    addr.as_mut().advance(pfx_bits, 0)?;
+                    addr.as_mut().skip_first(pfx_bits, 0)?;
                     b.store_slice_data(addr.as_ref())?;
                     let cell = gas_consumer.ctx(|c| b.build_ext(c))?;
                     addr = OwnedCellSlice::new(
@@ -297,7 +298,7 @@ fn read_rewrite_pfx(slice: &mut OwnedCellSlice) -> Result<Option<OwnedCellSlice>
 fn get_next_slice(slice: &mut OwnedCellSlice, bit_len: u16) -> Result<OwnedCellSlice> {
     let mut result = slice.clone();
     result.as_mut().shrink(Some(bit_len), Some(0))?;
-    slice.as_mut().advance(bit_len, 0)?;
+    slice.as_mut().skip_first(bit_len, 0)?;
     Ok(result)
 }
 

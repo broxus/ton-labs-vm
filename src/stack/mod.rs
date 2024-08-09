@@ -17,6 +17,7 @@ use everscale_types::cell::{Cell, CellSlice, LoadMode, MAX_BIT_LEN, MAX_REF_COUN
 use everscale_types::dict::{RawDict};
 use everscale_types::prelude::{CellBuilder, CellType};
 
+use crate::utils::CellSliceExt;
 use crate::{Fmt, OwnedCellSlice, types::{ExceptionCode, Result}};
 use integer::serialization::{Encoding, SignedIntegerBigEndianEncoding};
 use serialization::Deserializer;
@@ -146,10 +147,10 @@ fn slice_serialize(slice: &OwnedCellSlice) -> Result<CellBuilder> {
     let mut builder = CellBuilder::new();
     builder.store_reference(slice.cell().clone())?;
     let a = slice.as_ref();
-    builder.store_uint(a.bits_offset() as u64, 10)?;
-    builder.store_uint((a.bits_offset() + a.remaining_bits()) as u64, 10)?;
-    builder.store_small_uint(a.refs_offset(), 3)?;
-    builder.store_small_uint(a.refs_offset() + a.remaining_refs(), 3)?;
+    builder.store_uint(a.offset_bits() as u64, 10)?;
+    builder.store_uint((a.offset_bits() + a.size_bits()) as u64, 10)?;
+    builder.store_small_uint(a.offset_refs(), 3)?;
+    builder.store_small_uint(a.offset_refs() + a.size_refs(), 3)?;
     Ok(builder)
 }
 
@@ -166,7 +167,7 @@ fn slice_deserialize(slice: &mut CellSlice) -> Result<OwnedCellSlice> {
         return err!(ExceptionCode::FatalError, "slice deserialize error refs: {}..{}", ref_start, ref_end)
     }
     let mut res = OwnedCellSlice::new(cell)?;
-    res.as_mut().advance(data_start, ref_start)?;
+    res.as_mut().skip_first(data_start, ref_start)?;
     res.as_mut().shrink(Some(data_end - data_start), Some(ref_end - ref_start))?;
     Ok(res)
 }
@@ -567,7 +568,7 @@ impl StackItem {
                 format!("C{{{}}}", data.repr_hash().to_string().to_ascii_uppercase()),
             StackItem::Continuation(_data) => "???".to_string(),
             StackItem::Builder(data) => {
-                let bits = data.bit_len();
+                let bits = data.size_bits();
                 let mut bytes = vec![data.references().len() as u8];
                 let mut l = 2 * (bits / 8) as u8;
                 let tag = if bits & 7 != 0 {
@@ -589,14 +590,14 @@ impl StackItem {
                     let res = ((bits / 8) * 2) as u8;
                     if bits & 7 != 0 { res + 1 } else { res }
                 };
-                let bits_start = data.as_ref().bits_offset();
-                let bits_end = bits_start + data.as_ref().remaining_bits();
-                let refs_start = data.as_ref().refs_offset();
-                let refs_end = refs_start + data.as_ref().remaining_refs();
+                let bits_start = data.as_ref().offset_bits();
+                let bits_end = bits_start + data.as_ref().size_bits();
+                let refs_start = data.as_ref().offset_refs();
+                let refs_end = refs_start + data.as_ref().size_refs();
                 let mut bytes = vec![];
                 let is_special = data.cell().cell_type() != CellType::Ordinary;
                 bytes.push(d1(data.cell().level_mask().to_byte(), data.cell().reference_count(), is_special as u8));
-                bytes.push(d2(data.as_ref().remaining_bits() as u32));
+                bytes.push(d2(data.as_ref().size_bits() as u32));
                 bytes.extend_from_slice(data.cell().as_ref().data());
                 if bytes.last() == Some(&0x80) {
                     bytes.pop();

@@ -53,8 +53,8 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
             StackItem::Slice(x)        =>
                 format!("CS<{}>({}..{})",
                         x.as_ref().display_data().to_string().to_ascii_uppercase(),
-                        x.as_ref().bits_offset(),
-                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
+                        x.as_ref().offset_bits(),
+                        x.as_ref().offset_bits() + x.as_ref().size_bits()),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple),
         }
     } else if how.bit(BIN) {
@@ -67,8 +67,8 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
             StackItem::Slice(x)        =>
                 format!("CS<{:b}>({}..{})",
                         x.cell().display_data(),
-                        x.as_ref().bits_offset(),
-                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
+                        x.as_ref().offset_bits(),
+                        x.as_ref().offset_bits() + x.as_ref().size_bits()),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple),
         }
     } else if how.bit(STR) {
@@ -77,11 +77,11 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
             StackItem::Builder(x)      => x.raw_data().to_vec(),
             StackItem::Cell(x)         => x.as_ref().data().to_vec(),
             StackItem::Continuation(x) => x.code().as_ref()
-                .get_raw(0, &mut [0; 128], x.code().as_ref().remaining_bits())
+                .get_raw(0, &mut [0; 128], x.code().as_ref().size_bits())
                 .unwrap_or_default().to_vec(),
             StackItem::Integer(x)      => return format!("{}", Arc::as_ref(x)),
             StackItem::Slice(x)        => x.as_ref()
-                .get_raw(0, &mut [0; 128], x.as_ref().remaining_bits())
+                .get_raw(0, &mut [0; 128], x.as_ref().size_bits())
                 .unwrap_or_default().to_vec(),
             StackItem::Tuple(x)        => dump_tuple_impl(x, how, in_tuple).as_bytes().to_vec(),
         };
@@ -103,8 +103,8 @@ fn dump_var_impl(item: &StackItem, how: u8, in_tuple: bool) -> String {
             StackItem::Slice(x)        =>
                 format!("CS<{}>({}..{})",
                         x.as_ref().display_data().to_string().to_ascii_uppercase(),
-                        x.as_ref().bits_offset(),
-                        x.as_ref().bits_offset() + x.as_ref().remaining_bits()),
+                        x.as_ref().offset_bits(),
+                        x.as_ref().offset_bits() + x.as_ref().size_bits()),
             StackItem::Tuple(x) => dump_tuple_impl(x, how, in_tuple),
         }
     }
@@ -256,7 +256,7 @@ where F: FnOnce(&mut Engine, &str) -> Status {
     )?;
     if engine.debug() {
         let slice = engine.cmd.slice().as_ref();
-        match str::from_utf8(slice.get_raw(0, &mut [0; 128], slice.remaining_bits()).unwrap_or_default()) {
+        match str::from_utf8(slice.get_raw(0, &mut [0; 128], slice.size_bits()).unwrap_or_default()) {
             Ok(string) => {
                 if engine.debug() {
                     op(engine, string)?
