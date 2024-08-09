@@ -44,7 +44,7 @@ fn dict_get_wrap(
     key: CellSlice
 ) -> Result<Option<OwnedCellSlice>> {
     let result = gas_consumer
-        .ctx(|c| dict_get_owned(dict.as_ref(), key.remaining_bits(), key, c))?
+        .ctx(|c| dict_get_owned(dict.as_ref(), key.size_bits(), key, c))?
         .map(OwnedCellSlice::try_from).transpose()?;
     Ok(result)
 }
@@ -56,7 +56,7 @@ fn dict_insert_wrap(
     new_val: &dyn Store,
     mode: SetMode
 ) -> Result<Option<OwnedCellSlice>> {
-    let key_len = key.remaining_bits();
+    let key_len = key.size_bits();
     let (_, prev) = gas_consumer
         .ctx(|c| dict_insert_owned(dict, key.as_mut(), key_len, new_val, mode, c))?;
     Ok(prev.map(OwnedCellSlice::try_from).transpose()?)
@@ -67,7 +67,7 @@ fn dict_remove_wrap(
     dict: &mut Option<Cell>,
     mut key: CellSlice
 ) -> Result<Option<OwnedCellSlice>> {
-    let key_len = key.remaining_bits();
+    let key_len = key.size_bits();
     let prev = gas_consumer
         .ctx(|c| dict_remove_owned(dict, key.as_mut(), key_len, false, c))?;
     Ok(prev.map(OwnedCellSlice::try_from).transpose()?)
@@ -75,7 +75,7 @@ fn dict_remove_wrap(
 
 
 fn try_unref_leaf(slice: OwnedCellSlice) -> Result<StackItem> {
-    match slice.as_ref().remaining_bits() == 0 && slice.as_ref().remaining_refs() != 0 {
+    match slice.as_ref().size_bits() == 0 && slice.as_ref().size_refs() != 0 {
         true => {
             Ok(StackItem::Cell(slice.as_ref().get_reference_cloned(0)?))
         },
@@ -134,7 +134,7 @@ fn dict(
     let mut dict_cell = engine.cmd.var(1).as_dict()?.cloned();
     let mut key = CellBuilder::new();
     keyreader(engine.cmd.var(2), nbits, &mut key)?; // TODO: somehow reuse `cmd` ref in handler
-    if key.bit_len() == 0 {
+    if key.size_bits() == 0 {
         if how.any(SET | DEL) {
             err!(ExceptionCode::RangeCheckError, "key cannot be empty for set or delete")
         } else {
@@ -325,7 +325,7 @@ fn pfxdictget(engine: &mut Engine, name: &'static str, how: u8) -> Status {
         key   = engine.cmd.var(2).as_slice()?.clone();
     }
     if let (prefix, Some(value), suffix) = dict.get_prefix_leaf_with_gas(key.clone(), engine)? {
-        engine.cc.stack.push(StackItem::Slice(key.shrink_data(prefix.remaining_bits()..)));
+        engine.cc.stack.push(StackItem::Slice(key.shrink_data(prefix.size_bits()..)));
         if get_cont {
             engine.cmd.vars.push(StackItem::continuation(
                 ContinuationData::with_code(value)
@@ -362,7 +362,7 @@ fn pfxdictget(engine: &mut Engine, name: &'static str, how: u8) -> Status {
 */
 fn keyreader_from_slice<'a>(key: &'a StackItem, nbits: usize, builder: &'a mut CellBuilder) -> Status {
     let key = key.as_slice()?.as_ref();
-    if (key.remaining_bits() as usize) < nbits {
+    if (key.size_bits() as usize) < nbits {
         err!(ExceptionCode::CellUnderflow)
     } else {
         builder.store_slice_data(key.get_prefix(nbits as _, 0))?;
@@ -521,7 +521,7 @@ fn iter_reader(
     how: u8,
 ) -> Result<Option<(CellBuilder, StackItem)>> {
     let towards = if how.bit(NEXT) { DictBound::Max } else { DictBound::Min };
-    match gas_consumer.ctx(|c| dict_find_owned(dict, key.as_ref().remaining_bits(), key, towards, how.bit(SAME), how.bit(SIGN), c))? {
+    match gas_consumer.ctx(|c| dict_find_owned(dict, key.as_ref().size_bits(), key, towards, how.bit(SAME), how.bit(SIGN), c))? {
         Some((key, val)) => {
             Ok(Some((key, StackItem::Slice(val.try_into()?))))
         },
@@ -546,12 +546,12 @@ fn write_key(gas_consumer: &mut GasConsumer, key: CellBuilder, how: u8) -> Resul
         let cell = gas_consumer.ctx(|c| key.build_ext(c))?;
         Ok(StackItem::Slice(OwnedCellSlice::try_from(cell)?))
     } else if how.bit(SIGN) {
-        let encoding = SignedIntegerBigEndianEncoding::new(key.bit_len() as usize);
-        let ret = encoding.deserialize(&key.raw_data()[..((key.bit_len() as usize + 7) / 8)]);
+        let encoding = SignedIntegerBigEndianEncoding::new(key.size_bits() as usize);
+        let ret = encoding.deserialize(&key.raw_data()[..((key.size_bits() as usize + 7) / 8)]);
         Ok(StackItem::integer(ret))
     } else {
-        let encoding = UnsignedIntegerBigEndianEncoding::new(key.bit_len() as usize);
-        let ret = encoding.deserialize(&key.raw_data()[..((key.bit_len() as usize + 7) / 8)]);
+        let encoding = UnsignedIntegerBigEndianEncoding::new(key.size_bits() as usize);
+        let ret = encoding.deserialize(&key.raw_data()[..((key.size_bits() as usize + 7) / 8)]);
         Ok(StackItem::integer(ret))
     }
 }
@@ -1088,7 +1088,7 @@ pub(super) fn execute_dictpushconst(engine: &mut Engine) -> Status {
         Instruction::new("DICTPUSHCONST").set_opts(InstructionOptions::Dictionary(13, 10))
     )?;
     let slice = engine.cmd.slice();
-    if slice.as_ref().remaining_refs() == 0 {
+    if slice.as_ref().size_refs() == 0 {
         return err!(ExceptionCode::InvalidOpcode);
     } else {
         engine.cc.stack.push(StackItem::Cell(slice.as_ref().get_reference_cloned(0)?));

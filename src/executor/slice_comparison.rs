@@ -58,7 +58,7 @@ fn first_distinct_bit<F>(engine: &mut Engine, name: &'static str, operation: F) 
     fetch_stack(engine, 2)?;
     let s0 = engine.cmd.var(0).as_slice()?.as_ref();
     let s1 = engine.cmd.var(1).as_slice()?.as_ref();
-    let common_bits = s0.longest_common_data_prefix(s1).remaining_bits();
+    let common_bits = s0.longest_common_data_prefix(s1).size_bits();
     let r = operation(s1.get_bit(common_bits).ok(), s0.get_bit(common_bits).ok());
     engine.cc.stack.push(r);
     Ok(())
@@ -68,24 +68,24 @@ fn first_distinct_bit<F>(engine: &mut Engine, name: &'static str, operation: F) 
 /// (i.e., contains no bits of data and no cell references).
 pub(super) fn execute_sempty(engine: &mut Engine) -> Status {
     unary(engine, "SEMPTY", |slice| boolean!(
-        (slice.remaining_bits() == 0) && (slice.remaining_refs() == 0)
+        (slice.size_bits() == 0) && (slice.size_refs() == 0)
     ))
 }
 
 /// SDEMPTY (s – s ≈ ∅), checks whether Slice s has no bits of data.
 pub(super) fn execute_sdempty(engine: &mut Engine) -> Status {
-    unary(engine, "SDEMPTY", |slice| boolean!(slice.remaining_bits() == 0))
+    unary(engine, "SDEMPTY", |slice| boolean!(slice.size_bits() == 0))
 }
 
 /// SREMPTY (s – r(s) = 0), checks whether Slice s has no refer- ences.
 pub(super) fn execute_srempty(engine: &mut Engine) -> Status {
-    unary(engine, "SREMPTY", |slice| boolean!(slice.remaining_refs() == 0))
+    unary(engine, "SREMPTY", |slice| boolean!(slice.size_refs() == 0))
 }
 
 /// SDFIRST (s – s0 = 1), checks whether the first bit of Slice s is a one.
 pub(super) fn execute_sdfirst(engine: &mut Engine) -> Status {
     unary(engine, "SDFIRST", |slice| boolean!(
-        (slice.remaining_bits() != 0) && (slice.get_bit(0) == Ok(true))
+        (slice.size_bits() != 0) && (slice.get_bit(0) == Ok(true))
     ))
 }
 
@@ -140,12 +140,12 @@ pub(super) fn execute_sdppfxrev(engine: &mut Engine) -> Status {
 /// SDSFX(s s′ – ?), checks whether s is a suffix of s′.
 pub(super) fn execute_sdsfx(engine: &mut Engine) -> Status {
     binary(engine, "SDSFX", |s1, s0| Ok(boolean!({
-        let l0 = s0.remaining_bits();
-        let l1 = s1.remaining_bits();
+        let l0 = s0.size_bits();
+        let l1 = s1.size_bits();
         if l1 <= l0 {
             let mut s0 = s0.clone();
-            s0.advance(l0 - l1, 0)?;
-            s0.longest_common_data_prefix(s1).remaining_bits() == l1
+            s0.skip_first(l0 - l1, 0)?;
+            s0.longest_common_data_prefix(s1).size_bits() == l1
         } else {
             false
         }
@@ -155,12 +155,12 @@ pub(super) fn execute_sdsfx(engine: &mut Engine) -> Status {
 /// SDSFXREV (s s′ – ?), checks whether s′ is a suffix of s.
 pub(super) fn execute_sdsfxrev(engine: &mut Engine) -> Status {
     binary(engine, "SDSFXREV", |s1, s0| Ok(boolean!({
-        let l0 = s0.remaining_bits();
-        let l1 = s1.remaining_bits();
+        let l0 = s0.size_bits();
+        let l1 = s1.size_bits();
         if l0 <= l1 {
             let mut s1 = s1.clone();
-            s1.advance(l1 - l0, 0)?;
-            s1.longest_common_data_prefix(s0).remaining_bits() == l0
+            s1.skip_first(l1 - l0, 0)?;
+            s1.longest_common_data_prefix(s0).size_bits() == l0
         } else {
             false
         }
@@ -170,12 +170,12 @@ pub(super) fn execute_sdsfxrev(engine: &mut Engine) -> Status {
 ///  SDPSFX (s s′ – ?), checks whether s is a proper suffix of s′.
 pub(super) fn execute_sdpsfx(engine: &mut Engine) -> Status {
     binary(engine, "SDPSFX", |s1, s0| Ok(boolean!({
-        let l0 = s0.remaining_bits();
-        let l1 = s1.remaining_bits();
+        let l0 = s0.size_bits();
+        let l1 = s1.size_bits();
         if l1 < l0 {
             let mut s0 = s0.clone();
-            s0.advance(l0 - l1, 0)?;
-            s0.longest_common_data_prefix(s1).remaining_bits() == l1
+            s0.skip_first(l0 - l1, 0)?;
+            s0.longest_common_data_prefix(s1).size_bits() == l1
         } else {
             false
         }
@@ -185,12 +185,12 @@ pub(super) fn execute_sdpsfx(engine: &mut Engine) -> Status {
 /// SDPSFXREV (s s′ – ?), checks whether s′ is a proper suffix of s.
 pub(super) fn execute_sdpsfxrev(engine: &mut Engine) -> Status {
     binary(engine, "SDPSFXREV", |s1, s0| Ok(boolean!({
-        let l0 = s0.remaining_bits();
-        let l1 = s1.remaining_bits();
+        let l0 = s0.size_bits();
+        let l1 = s1.size_bits();
         if l0 < l1 {
             let mut s1 = s1.clone();
-            s1.advance(l1 - l0, 0)?;
-            s1.longest_common_data_prefix(s0).remaining_bits() == l0
+            s1.skip_first(l1 - l0, 0)?;
+            s1.longest_common_data_prefix(s0).size_bits() == l0
         } else {
             false
         }
@@ -200,7 +200,7 @@ pub(super) fn execute_sdpsfxrev(engine: &mut Engine) -> Status {
 /// SDCNTLEAD0 (s – n), returns the number of leading zeroes in s.
 pub(super) fn execute_sdcntlead0(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTLEAD0", |slice| int!({
-        let n = slice.remaining_bits();
+        let n = slice.size_bits();
         (0..n).position(|i| slice.get_bit(i) == Ok(true)).unwrap_or(n as usize)
     }))
 }
@@ -208,7 +208,7 @@ pub(super) fn execute_sdcntlead0(engine: &mut Engine) -> Status {
 /// SDCNTLEAD1 (s – n), returns the number of leading ones in s.
 pub(super) fn execute_sdcntlead1(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTLEAD1", |slice| int!({
-        let n = slice.remaining_bits();
+        let n = slice.size_bits();
         (0..n).position(|i| slice.get_bit(i) == Ok(false)).unwrap_or(n as usize)
     }))
 }
@@ -216,7 +216,7 @@ pub(super) fn execute_sdcntlead1(engine: &mut Engine) -> Status {
 /// SDCNTTRAIL0 (s – n), returns the number of trailing zeroes in s.
 pub(super) fn execute_sdcnttrail0(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTTRAIL0", |slice| int!({
-        let n = slice.remaining_bits();
+        let n = slice.size_bits();
         (0..n).position(|i| slice.get_bit(n - i - 1) == Ok(true)).unwrap_or(n as usize)
     }))
 }
@@ -224,8 +224,7 @@ pub(super) fn execute_sdcnttrail0(engine: &mut Engine) -> Status {
 /// SDCNTTRAIL1 (s – n), returns the number of trailing ones in s.
 pub(super) fn execute_sdcnttrail1(engine: &mut Engine) -> Status {
     unary(engine, "SDCNTTRAIL1", |slice| int!({
-        let n = slice.remaining_bits();
+        let n = slice.size_bits();
         (0..n).position(|i| slice.get_bit(n - i - 1) == Ok(false)).unwrap_or(n as usize)
     }))
 }
-

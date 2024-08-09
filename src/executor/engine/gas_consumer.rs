@@ -267,7 +267,7 @@ unsafe fn get_library_parent_cell<'s, 'c: 's>(
     ctx: &mut dyn CellContext,
 ) -> Result<&'c DynCell> {
     let mut key = cell.as_slice()?;
-    key.advance(8, 0)?;
+    key.skip_first(8, 0)?;
     let hash = key.get_u256(0)?;
     for library in libraries {
         if let Some(lib) = library.get_ext(key, ctx)? {
@@ -294,13 +294,13 @@ unsafe fn get_library_parent_cell<'s, 'c: 's>(
 
 fn get_hash_for_merkle_proof(cell: &DynCell) -> Result<HashBytes> {
     let mut slice = cell.as_slice()?;
-    slice.advance(8, 0)?;
+    slice.skip_first(8, 0)?;
     Ok(slice.load_u256()?)
 }
 
 fn get_hash_for_merkle_update(cell: &DynCell) -> Result<HashBytes> {
     let mut slice = cell.as_slice()?;
-    slice.advance(8, 0)?;
+    slice.skip_first(8, 0)?;
     let hash = slice.load_u256()?;
     if cell
         .reference(0)
@@ -313,7 +313,7 @@ fn get_hash_for_merkle_update(cell: &DynCell) -> Result<HashBytes> {
             "hash of merkle update cell is not corresponded to child cell"
         );
     }
-    slice.advance(16, 0)?;
+    slice.skip_first(16, 0)?;
     Ok(slice.load_u256()?)
 }
 

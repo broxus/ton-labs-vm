@@ -6,7 +6,7 @@ pub struct Fmt<'a, T>(pub &'a T);
 
 impl std::fmt::Display for Fmt<'_, CellBuilder> {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "bits: {}, refs: {}, data: {}", self.0.bit_len(), self.0.reference_count(), &self.0.display_data())
+        write!(f, "bits: {}, refs: {}, data: {}", self.0.size_bits(), self.0.size_refs(), &self.0.display_data())
     }
 }
 
@@ -41,10 +41,10 @@ impl std::fmt::Display for Fmt<'_, CellSliceParts> {
 impl std::fmt::Display for Fmt<'_, CellSliceRange> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "bits: {}..{}, refs: {}..{}",
-               self.0.bits_offset(),
-               self.0.bits_offset() + self.0.remaining_bits(),
-               self.0.refs_offset(),
-               self.0.refs_offset() + self.0.remaining_refs(),
+               self.0.offset_bits(),
+               self.0.offset_bits() + self.0.size_bits(),
+               self.0.offset_refs(),
+               self.0.offset_refs() + self.0.size_refs(),
         )
     }
 }

@@ -70,8 +70,8 @@ pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
     engine.load_instruction(Instruction::new("SHA256U"))?;
     fetch_stack(engine, 1)?;
     let slice = engine.cmd.var(0).as_slice()?.as_ref();
-    if slice.remaining_bits() % 8 == 0 {
-        let hash = sha2::Sha256::digest(slice.get_raw(0, &mut [0; 32], slice.remaining_bits())?);
+    if slice.size_bits() % 8 == 0 {
+        let hash = sha2::Sha256::digest(slice.get_raw(0, &mut [0; 32], slice.size_bits())?);
         engine.cc.stack.push(StackItem::integer(hash_to_uint(hash)));
         Ok(())
     } else {
@@ -88,7 +88,7 @@ impl AsRef<[u8]> for DataForSignature {
     fn as_ref(&self) -> &[u8] {
         match self {
             DataForSignature::Hash(hash) =>
-                &hash.raw_data()[..(hash.bit_len() as usize + 7) / 8],
+                &hash.raw_data()[..(hash.size_bits() as usize + 7) / 8],
             DataForSignature::Slice(slice) => slice.as_slice()
         }
     }
@@ -115,7 +115,7 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
     } else {
         engine.cmd.var(2).as_slice()?;
     }
-    if engine.cmd.var(1).as_slice()?.as_ref().remaining_bits() < SIGNATURE_BITS {
+    if engine.cmd.var(1).as_slice()?.as_ref().size_bits() < SIGNATURE_BITS {
         return err!(ExceptionCode::CellUnderflow)
     }
     let data = if hash {
@@ -123,10 +123,10 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
             .as_builder::<UnsignedIntegerBigEndianEncoding>(256)?)
     } else {
         let var2 = engine.cmd.var(2).as_slice()?.as_ref();
-        if var2.remaining_bits() % 8 != 0 {
+        if var2.size_bits() % 8 != 0 {
             return err!(ExceptionCode::CellUnderflow)
         }
-        DataForSignature::Slice(Vec::from(var2.get_raw(0, &mut [0; 128], var2.remaining_bits())?))
+        DataForSignature::Slice(Vec::from(var2.get_raw(0, &mut [0; 128], var2.size_bits())?))
     };
     let pub_key = {
         let mut buffer = [0; PUBLIC_KEY_BYTES];
