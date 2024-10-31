@@ -7,7 +7,7 @@ version = "2.0.0"
 ahash = "0.8"
 anyhow = "1.0"
 hex = "0.4"
-lazy_static = "1.4"
+lazy_static = "1.5"
 num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
@@ -16,7 +16,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 tracing = "0.1"
 
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", features = ["stats"], branch = "tycho" }
+everscale-types = { version = "0.1.0", features = ["stats"] }
 everscale-crypto = "0.2"
 
 [features]
