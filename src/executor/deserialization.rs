@@ -385,7 +385,8 @@ fn sdbegins(engine: &mut Engine, name: &'static str, how: u8) -> Status {
             return err!(ExceptionCode::CellUnderflow)
         }
     }
-    let result =  prefix.as_ref().strip_data_prefix(tested.as_ref()).is_none();
+    let result = tested.as_ref().longest_common_data_prefix(prefix.as_ref())
+        .size_bits() == prefix.as_ref().size_bits();
     if result {
         tested.as_mut().skip_first(len, 0)?;
     } else if !how.bit(QUIET) {
