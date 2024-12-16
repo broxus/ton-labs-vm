@@ -71,7 +71,7 @@ pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
     fetch_stack(engine, 1)?;
     let slice = engine.cmd.var(0).as_slice()?.as_ref();
     if slice.size_bits() % 8 == 0 {
-        let hash = sha2::Sha256::digest(slice.get_raw(0, &mut [0; 32], slice.size_bits())?);
+        let hash = sha2::Sha256::digest(slice.get_raw(0, &mut [0; 128], slice.size_bits())?);
         engine.cc.stack.push(StackItem::integer(hash_to_uint(hash)));
         Ok(())
     } else {
