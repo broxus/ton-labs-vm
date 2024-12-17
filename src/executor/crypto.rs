@@ -27,8 +27,9 @@ use crate::{
 };
 use ed25519::signature::Verifier;
 use std::borrow::Cow;
+use sha2::{Digest, Sha256};
 use ton_block::GlobalCapabilities;
-use ton_types::{BuilderData, error, GasConsumer, ExceptionCode, UInt256};
+use ton_types::{BuilderData, error, GasConsumer, ExceptionCode, UInt256, SliceData};
 
 const PUBLIC_KEY_BITS:  usize = PUBLIC_KEY_BYTES * 8;
 const SIGNATURE_BITS:   usize = SIGNATURE_BYTES * 8;
@@ -78,6 +79,45 @@ pub(super) fn execute_sha256u(engine: &mut Engine) -> Status {
     } else {
         err!(ExceptionCode::CellUnderflow)
     }
+}
+
+pub(super) fn execute_hash_ext(engine: &mut Engine) -> Status {
+    engine.load_instruction(Instruction::new("HASHEXT_SHA256"))?;
+    fetch_stack(engine, 2)?;
+
+    let cnt = engine.cmd.var(0).as_integer()?.into(0..=u8::MAX)?;
+    if cnt != 1 {
+        return err!(ExceptionCode::TypeCheckError)
+    }
+
+    let builder = engine.cmd.var(1).as_builder()?.clone();
+    let slice = SliceData::load_builder(builder)?;
+
+    if slice.remaining_bits() % 8 == 0 {
+        let hash_id = engine.last_cmd();
+        if hash_id != 0 {
+            return err!(ExceptionCode::TypeCheckError)
+        }
+
+        let hash: [u8; 32] = Sha256::digest(&slice.get_bytestring(0)).into();
+        let hash_int = hash_to_uint(hash);
+        engine.cc.stack.push(StackItem::integer(hash_int));
+        Ok(())
+    } else {
+        err!(ExceptionCode::CellUnderflow)
+    }
+}
+
+pub(super) fn execute_hash_extr(_engine: &mut Engine) -> Status {
+    err!(ExceptionCode::FatalError)
+}
+
+pub(super) fn execute_hash_exta(_engine: &mut Engine) -> Status {
+    err!(ExceptionCode::FatalError)
+}
+
+pub(super) fn execute_hash_extar(_engine: &mut Engine) -> Status {
+    err!(ExceptionCode::FatalError)
 }
 
 enum DataForSignature {

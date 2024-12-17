@@ -885,6 +885,14 @@ impl Handlers {
             .set(0x45, execute_find_by_code_hash)
             .set(0x46, execute_find_by_data_hash)
             .set(0x50, execute_try_elect)
+            .add_subset(0x04,  Handlers::new()
+                .set_range(0x00..0x04, execute_hash_ext))
+            .add_subset(0x05,  Handlers::new()
+                .set_range(0x00..0x04, execute_hash_extr))
+            .add_subset(0x06,  Handlers::new()
+                .set_range(0x00..0x04, execute_hash_exta))
+            .add_subset(0x07,  Handlers::new()
+                .set_range(0x00..0x04, execute_hash_extar))
         )
     }
     /// Dumping functions
