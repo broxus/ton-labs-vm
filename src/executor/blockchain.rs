@@ -72,7 +72,7 @@ pub(super) fn execute_changelib(engine: &mut Engine) -> Status {
     let x = engine.cmd.var(0).as_integer()?.into(0..=2)? as u8;
     let hash = engine.cmd.var(1).as_integer()?.as_builder::<UnsignedIntegerBigEndianEncoding>(256)?;
     let action = OutAction::ChangeLibrary {
-        mode: ChangeLibraryMode::try_from(x)?,
+        mode: ChangeLibraryMode::from_bits_retain(x),
         lib: LibRef::Hash(HashBytes::from_slice(hash.raw_data()))
     };
     add_action(engine, &action)
@@ -109,7 +109,7 @@ pub(super) fn execute_setlibcode(engine: &mut Engine) -> Status {
     let x = engine.cmd.var(0).as_integer()?.into(0..=2)?;
     let cell = engine.cmd.var(1).as_cell()?.clone();
     let action = OutAction::ChangeLibrary {
-        mode: ChangeLibraryMode::try_from(x)?,
+        mode: ChangeLibraryMode::from_bits_retain(x),
         lib: LibRef::Cell(cell)
     };
     add_action(engine, &action)

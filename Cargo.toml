@@ -22,3 +22,6 @@ everscale-crypto = "0.3"
 [features]
 fift_check = []
 verbose = []
+
+[patch.crates-io]
+everscale-types = { git = "https://github.com/broxus/everscale-types.git" }

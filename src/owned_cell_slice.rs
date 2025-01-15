@@ -76,7 +76,7 @@ impl OwnedCellSlice {
     /// The following must be true:
     /// - cell is not pruned
     unsafe fn new_unchecked(cell: Cell) -> Self {
-        let cell_slice = cell.as_slice_unchecked();
+        let cell_slice = cell.as_slice_allow_pruned();
         Self {
             // SAFETY: cell reference points to the pinned location
             cell_slice: unsafe { std::mem::transmute::<_, CellSlice<'static>>(cell_slice) },
