@@ -112,8 +112,10 @@ pub(super) fn execute_randseed(engine: &mut Engine) -> Status {
 
 // - integer | none
 pub(super) fn execute_init_code_hash(engine: &mut Engine) -> Status {
-    engine.check_capability(GlobalCapabilities::CapInitCodeHash)?;
-    extract_config(engine, "INITCODEHASH")
+    match engine.check_capability(GlobalCapabilities::CapInitCodeHash) {
+        Ok(_) => extract_config(engine, "INITCODEHASH"),
+        Err(_) => extract_config(engine, "INCOMINGVALUE")
+    }
 }
 
 // - integer

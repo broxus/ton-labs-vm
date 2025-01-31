@@ -16,7 +16,7 @@ use crate::stack::{
     integer::IntegerData,
 };
 use sha2::{Sha256, Digest};
-use ton_block::{GlobalCapabilities, CurrencyCollection};
+use ton_block::{GlobalCapabilities, CurrencyCollection, Serializable};
 use ton_types::{Cell, HashmapE, HashmapType, SliceData, types::UInt256};
 
 /*
@@ -39,6 +39,7 @@ pub struct SmartContractInfo {
     pub seq_no: u32,
     pub rand_seed: IntegerData,
     pub balance: CurrencyCollection,
+    pub message_balance: CurrencyCollection,
     pub balance_remaining_grams: u128,
     pub balance_remaining_other: HashmapE,
     pub myself: SliceData,
@@ -188,6 +189,16 @@ impl SmartContractInfo{
                     add_params.push(StackItem::default());
                 }
                 add_params.push(f);
+            } else if matches!(caps, GlobalCapabilities::CapInitCodeHash) {
+                for _ in add_params.len()..i {
+                    add_params.push(StackItem::default());
+                }
+                add_params.push(StackItem::tuple(
+                    vec![
+                        int!(self.message_balance.grams.as_u128()),
+                        self.message_balance.other_as_hashmap().data().cloned().map_or(StackItem::None, StackItem::Cell)
+                    ])
+                );
             }
         }
         params.append(add_params);
