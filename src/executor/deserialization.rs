@@ -488,7 +488,12 @@ pub fn execute_sdskiplast(engine: &mut Engine) -> Status {
         Instruction::new("SDSKIPLAST")
     )?;
     fetch_stack(engine, 2)?;
-    sdcut(engine, INV | LAST, DROP)
+    let refs_flag = if engine.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64){
+        0
+    } else {
+        DROP
+    };
+    sdcut(engine, INV | LAST, refs_flag)
 }
 
 /// SDSUBSTR(s l` l`` - s`), returns 0 ≤ l′ ≤ 1023 bits of s
