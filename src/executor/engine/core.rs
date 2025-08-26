@@ -102,6 +102,7 @@ pub struct Engine {
     capabilities: u64,
     block_version: u32,
     signature_id: i32,
+    missing_library: Option<UInt256>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,6 +255,7 @@ impl Engine {
             capabilities,
             block_version: 0,
             signature_id: 0,
+            missing_library: None
         }
     }
 
@@ -787,6 +789,7 @@ impl Engine {
                 return Ok(lib);
             }
         }
+        self.missing_library = hash.get_next_hash().ok();
         err!(ExceptionCode::CellUnderflow, "Libraries do not contain code with hash {:x}", hash)
     }
 
@@ -1589,5 +1592,9 @@ impl Engine {
             Some(cell) => T::construct_from_cell(cell),
             None => err!("Cannot get config param {}", index)
         }
+    }
+
+    pub fn get_missing_library(&self) -> Option<UInt256> {
+        self.missing_library
     }
 }
