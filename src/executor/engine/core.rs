@@ -103,6 +103,7 @@ pub struct Engine {
     block_version: u32,
     signature_id: i32,
     missing_library: Option<UInt256>,
+    throw_on_code_access: bool
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,7 +256,8 @@ impl Engine {
             capabilities,
             block_version: 0,
             signature_id: 0,
-            missing_library: None
+            missing_library: None,
+            throw_on_code_access: false
         }
     }
 
@@ -550,6 +552,9 @@ impl Engine {
     }
 
     pub fn execute(&mut self) -> Result<i32> {
+        if self.throw_on_code_access {
+            return err!(ExceptionCode::FatalError, "no code loaded");
+        } 
         self.trace_info(EngineTraceInfoType::Start, 0, None);
         let result = loop {
             if let Some(result) = self.seek_next_cmd()? {
@@ -784,7 +789,7 @@ impl Engine {
             if let Some(lib_bucket) = library.get_with_gas(hash.clone(), self)? {
                 let lib = lib_bucket.reference(0)?;
                 if lib.repr_hash() != hash {
-                    return err!(ExceptionCode::DictionaryError, "Librariy hash does not correspond to map key {:x}", hash)
+                    return err!(ExceptionCode::DictionaryError, "Library hash does not correspond to map key {:x}", hash)
                 }
                 return Ok(lib);
             }
@@ -866,6 +871,23 @@ impl Engine {
         for hash in previous_hashes {
             self.visited_exotic_cells.insert(hash, slice.clone());
         }
+        Ok(slice)
+    }
+
+    /// Loads cell code 
+    pub fn load_code_slice(&mut self, mut cell: Cell) -> Result<SliceData> {
+        let slice = loop {
+            match cell.cell_type() {
+                CellType::Ordinary  => {
+                    break SliceData::load_cell(cell)?;
+                }
+                CellType::LibraryReference => {
+                    cell = self.load_library_cell(cell)?;
+                }
+                _ => return err!(ExceptionCode::CellUnderflow, "Wrong resolving cell type {}", cell.cell_type())
+            }
+
+        };
         Ok(slice)
     }
 
@@ -969,24 +991,29 @@ impl Engine {
         self.modifiers = modifiers;
     }
 
-    pub fn setup(self, code: SliceData, ctrls: Option<SaveList>, stack: Option<Stack>, gas: Option<Gas>) -> Self {
+    pub fn setup(self, code: Cell, ctrls: Option<SaveList>, stack: Option<Stack>, gas: Option<Gas>) -> Self {
         self.setup_with_libraries(code, ctrls, stack, gas, vec![])
     }
 
     pub fn setup_with_libraries(
         mut self,
-        code: SliceData,
+        code: Cell,
         mut ctrls: Option<SaveList>,
         stack: Option<Stack>,
         gas: Option<Gas>,
         libraries: Vec<HashmapE>
     ) -> Self {
-        *self.cc.code_mut() = code.clone();
-        self.cmd_code = SliceProto::from(self.cc.code());
+        self.libraries = libraries;
+        self.gas = gas.unwrap_or_else(Gas::test);
+        if let Some(code) = self.load_code_slice(code).ok(){
+            *self.cc.code_mut() = code;
+            self.cmd_code = SliceProto::from(self.cc.code());
+        } else {
+            self.throw_on_code_access = true;
+        }
         if let Some(stack) = stack {
             self.cc.stack = stack;
         }
-        self.gas = gas.unwrap_or_else(Gas::test);
         let cont = ContinuationType::Quit(ExceptionCode::NormalTermination as i32);
         self.ctrls.put(0, &mut StackItem::continuation(ContinuationData::with_type(cont))).unwrap();
         let cont = ContinuationType::Quit(ExceptionCode::AlternativeTermination as i32);
@@ -994,14 +1021,13 @@ impl Engine {
         if self.check_capabilities(GlobalCapabilities::CapsTvmBugfixes2022 as u64) {
             self.ctrls.put(2, &mut StackItem::continuation(ContinuationData::with_type(ContinuationType::ExcQuit))).unwrap();
         }
-        self.ctrls.put(3, &mut StackItem::continuation(ContinuationData::with_code(code.clone()))).unwrap();
+        self.ctrls.put(3, &mut StackItem::continuation(ContinuationData::with_code(self.cc.code().clone()))).unwrap();
         self.ctrls.put(4, &mut StackItem::cell(Cell::default())).unwrap();
         self.ctrls.put(5, &mut StackItem::cell(Cell::default())).unwrap();
-        self.ctrls.put(7, &mut SmartContractInfo::old_default(code.into_cell()).into_temp_data_item()).unwrap();
+        self.ctrls.put(7, &mut SmartContractInfo::old_default(self.cc.code().clone().into_cell()).into_temp_data_item()).unwrap();
         if let Some(ref mut ctrls) = ctrls {
             self.ctrls.apply(ctrls);
         }
-        self.libraries = libraries;
         self
     }
 
