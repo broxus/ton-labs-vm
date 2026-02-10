@@ -11,7 +11,7 @@
 * limitations under the License.
 */
 
-use ton_types::{error, fail, Result, ExceptionCode};
+use ton_types::{fail, Result, ExceptionCode};
 use crate::types::Exception;
 
 #[derive(Debug, thiserror::Error)]

@@ -75,6 +75,12 @@ impl From<&SliceData> for SliceProto {
 
 pub type TraceCallback = dyn Fn(&Engine, &EngineTraceInfo) + Send + Sync;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureDomain {
+    Empty,
+    L2 { global_id: i32 }
+}
+
 pub struct Engine {
     pub(in crate::executor) cc: ContinuationData,
     pub(in crate::executor) cmd: InstructionExt,
@@ -102,13 +108,15 @@ pub struct Engine {
     capabilities: u64,
     block_version: u32,
     signature_id: i32,
+    signature_domains: Vec<SignatureDomain>,
     missing_library: Option<UInt256>,
     throw_on_code_access: bool
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BehaviorModifiers {
-    pub chksig_always_succeed: bool
+    pub chksig_always_succeed: bool,
+    pub enable_signature_domains: bool
 }
 
 #[derive(Eq, Debug, PartialEq)]
@@ -256,6 +264,7 @@ impl Engine {
             capabilities,
             block_version: 0,
             signature_id: 0,
+            signature_domains: Vec::new(),
             missing_library: None,
             throw_on_code_access: false
         }
@@ -300,6 +309,22 @@ impl Engine {
 
     pub fn signature_id(&self) -> i32 {
         self.signature_id
+    }
+
+    pub fn signature_domain(&self) -> Option<SignatureDomain> {
+        self.signature_domains.last().copied()
+    }
+
+    pub fn signature_domains_len(&self) -> usize {
+        self.signature_domains.len()
+    }
+
+    pub fn push_signature_domain(&mut self, domain: SignatureDomain) {
+        self.signature_domains.push(domain);
+    }
+
+    pub fn pop_signature_domain(&mut self) -> SignatureDomain {
+        self.signature_domains.pop().unwrap_or(SignatureDomain::Empty)
     }
 
     pub fn check_or_set_flags(&mut self, flags: u64) -> bool {

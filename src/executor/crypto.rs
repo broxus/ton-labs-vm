@@ -14,7 +14,9 @@
 use crate::{
     error::TvmError,
     executor::{
-        engine::{Engine, storage::fetch_stack}, types::Instruction
+        engine::{Engine, SignatureDomain, storage::fetch_stack},
+        gas::gas_state::Gas,
+        types::Instruction
     },
     stack::{
         StackItem,
@@ -29,12 +31,14 @@ use ed25519::signature::Verifier;
 use std::borrow::Cow;
 use sha2::{Digest, Sha256};
 use ton_block::GlobalCapabilities;
-use ton_types::{BuilderData, error, GasConsumer, ExceptionCode, UInt256, SliceData};
+use ton_types::{BuilderData, error, GasConsumer, ExceptionCode, Result, UInt256, SliceData};
 
 const PUBLIC_KEY_BITS:  usize = PUBLIC_KEY_BYTES * 8;
 const SIGNATURE_BITS:   usize = SIGNATURE_BYTES * 8;
 const PUBLIC_KEY_BYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
 const SIGNATURE_BYTES:  usize = ed25519_dalek::SIGNATURE_LENGTH;
+const SIGNATURE_DOMAIN_L2_TLB_TAG: u32 = 0x71b34ee1;
+const SIGNATURE_DOMAIN_EMPTY_TLB_TAG: u32 = 0x0e1d571b;
 
 fn hash_to_uint(bits: impl AsRef<[u8]>) -> IntegerData {
     IntegerData::from_unsigned_bytes_be(bits)
@@ -134,17 +138,59 @@ impl AsRef<[u8]> for DataForSignature {
     }
 }
 
-fn preprocess_signed_data<'a>(engine: &Engine, data: &'a [u8]) -> Cow<'a, [u8]> {
-    if engine.check_capabilities(GlobalCapabilities::CapSignatureWithId as u64) {
-        let mut extended_data = Vec::with_capacity(4 + data.len());
-        extended_data.extend_from_slice(&engine.signature_id().to_be_bytes());
-        extended_data.extend_from_slice(data);
-        return Cow::Owned(extended_data)
+fn preprocess_signed_data<'a>(engine: &Engine, data: &'a [u8], can_use_id: bool) -> Cow<'a, [u8]> {
+    if !can_use_id {
+        return Cow::Borrowed(data)
     }
-    Cow::Borrowed(data)
+
+    let signature_id_enabled = engine.check_capabilities(GlobalCapabilities::CapSignatureWithId as u64);
+    if !engine.modifiers.enable_signature_domains {
+        if signature_id_enabled {
+            let mut extended_data = Vec::with_capacity(4 + data.len());
+            extended_data.extend_from_slice(&engine.signature_id().to_be_bytes());
+            extended_data.extend_from_slice(data);
+            return Cow::Owned(extended_data)
+        }
+        return Cow::Borrowed(data)
+    }
+
+    let signature_domain = match engine.signature_domain() {
+        Some(signature_domain) => signature_domain,
+        // fallback to signature_id
+        None if signature_id_enabled => {
+            SignatureDomain::L2 { global_id: engine.signature_id() }
+        }
+        None => SignatureDomain::Empty
+    };
+
+    if let SignatureDomain::Empty = signature_domain {
+        return Cow::Borrowed(data)
+    }
+
+    let mut extended_data = Vec::with_capacity(32 + data.len());
+    extended_data.extend_from_slice(&signature_domain_tl_hash(signature_domain));
+    extended_data.extend_from_slice(data);
+    Cow::Owned(extended_data)
 }
 
-fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Status {
+fn signature_domain_tl_hash(signature_domain: SignatureDomain) -> [u8; 32] {
+    let mut raw = Vec::with_capacity(match signature_domain {
+        SignatureDomain::Empty => 4,
+        SignatureDomain::L2 { .. } => 8
+    });
+    match signature_domain {
+        SignatureDomain::Empty => {
+            raw.extend_from_slice(&SIGNATURE_DOMAIN_EMPTY_TLB_TAG.to_le_bytes());
+        }
+        SignatureDomain::L2 { global_id } => {
+            raw.extend_from_slice(&SIGNATURE_DOMAIN_L2_TLB_TAG.to_le_bytes());
+            raw.extend_from_slice(&global_id.to_le_bytes());
+        }
+    }
+    Sha256::digest(&raw).into()
+}
+
+fn check_signature(engine: &mut Engine, name: &'static str, hash: bool, can_use_id: bool) -> Status {
     engine.load_instruction(Instruction::new(name))?;
     fetch_stack(engine, 3)?;
     let pub_key = engine.cmd.var(0).as_integer()?
@@ -194,7 +240,7 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
             }
         }
     };
-    let data = preprocess_signed_data(engine, data.as_ref());
+    let data = preprocess_signed_data(engine, data.as_ref(), can_use_id);
     let result =
         engine.modifiers.chksig_always_succeed || pub_key.verify(&data, &signature).is_ok();
     engine.cc.stack.push(boolean!(result));
@@ -207,12 +253,57 @@ fn check_signature(engine: &mut Engine, name: &'static str, hash: bool) -> Statu
 // throws a cell underflow exception. The verification of Ed25519 signatures is the standard one,
 // with sha256 used to reduce d to the 256-bit number that is actually signed.
 pub(super) fn execute_chksigns(engine: &mut Engine) -> Status {
-    check_signature(engine, "CHKSIGNS", false)
+    check_signature(engine, "CHKSIGNS", false, true)
 }
 
 /// CHKSIGNU (h s k – -1 or 0)
 /// checks the Ed25519-signature s (slice) of a hash h (a 256-bit unsigned integer)
 /// using public key k (256-bit unsigned integer).
 pub(super) fn execute_chksignu(engine: &mut Engine) -> Status {
-    check_signature(engine, "CHKSIGNU", true)
+    check_signature(engine, "CHKSIGNU", true, true)
+}
+
+/// ED25519_CHKSIGNS (d s k – ?)
+/// checks Ed25519 signature in legacy mode without signature-id or signature-domain prefix.
+pub(super) fn execute_ed25519_chksigns(engine: &mut Engine) -> Status {
+    check_signature(engine, "ED25519_CHKSIGNS", false, false)
+}
+
+pub(super) fn execute_signature_domain(engine: &mut Engine) -> Status {
+    engine.load_instruction(Instruction::new("SIGNDOMAIN"))?;
+    let domain = engine.signature_domain().unwrap_or(SignatureDomain::Empty);
+    engine.cc.stack.push(domain_to_stack_item(domain));
+    Ok(())
+}
+
+pub(super) fn execute_pop_signature_domain(engine: &mut Engine) -> Status {
+    engine.load_instruction(Instruction::new("SIGNDOMAIN_POP"))?;
+    engine.use_gas(Gas::tuple_gas_price(engine.signature_domains_len()));
+    let domain = engine.pop_signature_domain();
+    engine.cc.stack.push(domain_to_stack_item(domain));
+    Ok(())
+}
+
+pub(super) fn execute_push_signature_domain(engine: &mut Engine) -> Status {
+    engine.load_instruction(Instruction::new("SIGNDOMAIN_PUSH"))?;
+    fetch_stack(engine, 1)?;
+    let domain = domain_from_stack_item(engine.cmd.var(0))?;
+    engine.push_signature_domain(domain);
+    engine.use_gas(Gas::tuple_gas_price(engine.signature_domains_len()));
+    Ok(())
+}
+
+fn domain_to_stack_item(domain: SignatureDomain) -> StackItem {
+    match domain {
+        SignatureDomain::Empty => StackItem::None,
+        SignatureDomain::L2 { global_id } => int!(global_id)
+    }
+}
+
+fn domain_from_stack_item(item: &StackItem) -> Result<SignatureDomain> {
+    if item.is_null() {
+        return Ok(SignatureDomain::Empty)
+    }
+    let global_id = item.as_integer()?.into(i32::MIN..=i32::MAX)?;
+    Ok(SignatureDomain::L2 { global_id })
 }
